@@ -11,6 +11,8 @@ An unofficial build of [SpaghettiKart](https://github.com/HarbourMasters/Spaghet
 
 ## Download
 
+**Download the installer:** [latest release](../../releases/latest) · **HD textures:** [MK64 Reloaded (sk files)](https://github.com/GhostlyDark/MK64-Reloaded/releases/tag/v2026.04.03), see [HD textures](#hd-textures-optional) below.
+
 Get **`SpaghettiKart-LAN8-Setup-<version>.exe`** from the [latest release](../../releases/latest) and run it.
 
 - Installs for your Windows account only (no admin prompt), by default to `%LOCALAPPDATA%\SpaghettiKart-LAN8`.
@@ -24,6 +26,17 @@ Windows may warn that the app is from an unknown publisher because the build isn
 1. Start **SpaghettiKart LAN8**. A file window opens: pick your Mario Kart 64 ROM (or copy the `.z64` into the game folder first).
 2. Wait while it builds `mk64.o2r` from the ROM. **This can take up to 20 minutes** and the window says "Not responding" the whole time. Don't close it. After that the game starts straight away every time.
 3. The game uses OpenGL. If you get a black screen, press **Esc** > Settings > Graphics > Renderer API > DirectX 11 and restart.
+
+### HD textures (optional)
+
+The game looks much sharper with the **MK64 Reloaded** HD texture pack by GhostlyDark.
+
+1. Open the [MK64 Reloaded v2026.04.03 release](https://github.com/GhostlyDark/MK64-Reloaded/releases/tag/v2026.04.03).
+2. Download **only a file with `sk` in its name** (those are the SpaghettiKart versions; the others are for other emulators):
+   - [`mk64-reloaded-v2026.04.03-sk-hd.o2r`](https://github.com/GhostlyDark/MK64-Reloaded/releases/download/v2026.04.03/mk64-reloaded-v2026.04.03-sk-hd.o2r) (HD, 424 MB), or
+   - [`mk64-reloaded-v2026.04.03-sk-4k.o2r`](https://github.com/GhostlyDark/MK64-Reloaded/releases/download/v2026.04.03/mk64-reloaded-v2026.04.03-sk-4k.o2r) (4K, 1.15 GB).
+3. Put the `.o2r` file in the **`mods`** folder inside the game folder (by default `%LOCALAPPDATA%\SpaghettiKart-LAN8\mods`). Create the `mods` folder if it isn't there. Don't unzip or rename the file.
+4. Restart the game.
 
 ## Screenshots
 
