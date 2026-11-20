@@ -1,0 +1,375 @@
+From 4b0d975eea52df9cbb29f891b3c4c5d21ff54ddd Mon Sep 17 00:00:00 2001
+From: T3chnobone <98963290+T3chnobone@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 18:32:21 +0000
+Subject: [PATCH] Replaceable COUCH PARTY / LAN GAME buttons and character
+ highlight
+
+PNG files in a "textures" folder next to the game replace three menu
+pictures that the game draws in code:
+
+- couch_party_button.png / lan_game_button.png: the 64x54 picture at the
+  top of the 3rd and 4th main-menu columns.
+- character_highlight.png: the 64x76 frame around the portrait a player
+  is on in the Couch Party character select, tinted with each player's
+  colour; character_highlight_p1..p8.png give one player its own frame,
+  untinted.
+
+Any size up to 512x512 loads and is stretched to the slot, so 2x/4x
+pictures work. A missing or unreadable file falls back to the built-in
+drawing. docs/TEXTURES.md has the details.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Qq7B1sCP7X4epdhnNpx5qy
+---
+ docs/TEXTURES.md                     |  52 ++++++++++++
+ src/menu_items.c                     |  71 +++++++++++++++--
+ src/menu_items.h                     |   1 +
+ src/port/textures/CustomTextures.cpp | 115 +++++++++++++++++++++++++++
+ src/port/textures/custom_textures.h  |  38 +++++++++
+ 5 files changed, 271 insertions(+), 6 deletions(-)
+ create mode 100644 docs/TEXTURES.md
+ create mode 100644 src/port/textures/CustomTextures.cpp
+ create mode 100644 src/port/textures/custom_textures.h
+
+diff --git a/docs/TEXTURES.md b/docs/TEXTURES.md
+new file mode 100644
+index 000000000..e42d77c9e
+--- /dev/null
++++ b/docs/TEXTURES.md
+@@ -0,0 +1,52 @@
++# Replaceable menu pictures (textures folder)
++
++Three menu pictures can be swapped for your own PNG files. They live in the
++`textures` folder next to `Spaghettify.exe`:
++
++| File | What it is | Size in the game | Tinted? |
++|---|---|---|---|
++| `couch_party_button.png` | Top of the 3rd main-menu column (COUCH PARTY) | 64 x 54 | no |
++| `lan_game_button.png` | Top of the 4th main-menu column (LAN GAME) | 64 x 54 | no |
++| `character_highlight.png` | Frame around the portrait a player is on, Couch Party character select | 64 x 76 | yes, in each player's colour |
++| `character_highlight_p1.png` ... `_p8.png` | Optional: a frame of its own for one player | 64 x 76 | no |
++
++## Rules
++
++- **Format:** PNG with transparency (RGBA). 8-bit, palette and grey PNGs work too;
++  JPG, BMP and TGA also load, but they have no transparency.
++- **Size:** draw at the size above, or any multiple of it (2x = 128 x 108, 4x =
++  256 x 216, ...) for a sharper picture. Any other size is stretched to fit. The
++  largest accepted is 512 x 512.
++- **Transparent pixels** show what is behind the picture (the menu background,
++  or the character portrait for the highlight).
++- **character_highlight.png** is multiplied by each player's colour (red, blue,
++  yellow, green, orange, purple, cyan, pink for players 1 to 8). Draw it in white
++  and grey to keep the colours; a coloured picture is mixed with them. The middle
++  should be transparent so the portrait shows through. The player-number tag in
++  the corner is still drawn by the game on top.
++- A `character_highlight_pN.png` is used for player N as drawn, without the
++  tint, and wins over `character_highlight.png` for that player.
++- **Picked** characters still pulse, and the buttons still fade in and out with
++  the menu, using the picture's own transparency.
++
++## Going back to the built-in pictures
++
++Delete (or rename) the file. If a file is missing, can't be read, or is bigger
++than 512 x 512, the game draws its built-in picture instead and writes the reason
++in the log (`logs/` folder).
++
++The files are read once, when the menus first need them. Restart the game after
++changing them.
++
++## About the files that come with the game
++
++The COUCH PARTY and LAN GAME buttons and the coloured frames are not textures in
++the original game: they are drawn from boxes and text by the code. The files in
++the package are images of them: the boxes are exact, the lettering is close but
++uses a different font from the game's. Delete the two button files to get the
++game's own lettering back.
++
++The other menu textures that come from the ROM (the 1P/2P pictures, the stock
++1P-4P cursors and so on) can already be replaced with SpaghettiKart's mod
++folders: a folder or .zip/.o2r in `mods` holding `<resource path>.png`, for
++example `textures/texture_tkmk00/texture_menu_3p_game.png`.
+diff --git a/src/menu_items.c b/src/menu_items.c
+index c4147a7be..52f95aed6 100644
+--- a/src/menu_items.c
++++ b/src/menu_items.c
+@@ -1,6 +1,7 @@
+ #include "port/couch/couch.h"
+ #include "port/leaderboard/leaderboard_game.h"
+ #include "port/couch/lan_setup.h"
++#include "port/textures/custom_textures.h"
+ #include <libultraship.h>
+ #include "port/netplay/netrace.h"
+ #include <libultra/types.h>
+@@ -6496,8 +6497,16 @@ void render_menus(MenuItem* arg0) {
+             case MENU_ITEM_UI_4P_GAME:
+                 var_a1 = arg0->type - MENU_ITEM_UI_1P_GAME;
+                 func_800A8270(var_a1, arg0);
++                // Couch Party and LAN GAME relabel the 3P and 4P columns, with
++                // textures/couch_party_button.png and lan_game_button.png if
++                // they are there.
++                if (couch_enabled() && (var_a1 >= 2) &&
++                    custom_texture_present((var_a1 == 2) ? CUSTOM_TEX_COUCH_PARTY_BUTTON
++                                                         : CUSTOM_TEX_LAN_GAME_BUTTON)) {
++                    draw_couch_party_column_picture(arg0, var_a1);
++                    break;
++                }
+                 func_800A0FA4(arg0, var_a1);
+-                // Couch Party and LAN GAME relabel the 3P and 4P columns.
+                 if (couch_enabled() && (var_a1 == 2)) {
+                     draw_couch_party_column_title(arg0, "COUCH", "PARTY");
+                 } else if (couch_enabled() && (var_a1 == 3)) {
+@@ -7086,6 +7095,46 @@ void func_800A0EB8(UNUSED MenuItem* arg0, s32 arg1) {
+     gDisplayListHead = render_menu_textures(gDisplayListHead, D_0200184C, (s32) temp_v0->column, (s32) temp_v0->row);
+ }
+ 
++// Fade alpha of a main menu column, as the stock pictures fade.
++static s32 couch_party_column_alpha(MenuItem* arg0) {
++    s32 alpha = 255;
++
++    if ((arg0->state == 1) || (arg0->state == 4)) {
++        alpha = arg0->param1 * 8;
++        if (alpha > 255) {
++            alpha = 255;
++        }
++        if (alpha < 0) {
++            alpha = 0;
++        }
++    }
++    return alpha;
++}
++
++// Couch Party / LAN GAME with a picture from the textures folder: it takes the
++// place of the whole 64x54 "3P" / "4P" picture. The VS / BATTLE rows and the
++// little arrow below are kept.
++void draw_couch_party_column_picture(MenuItem* arg0, s32 column) {
++    MenuTexture* picture = seg2_menu_3p_column; // its first entry is the 64x54 picture
++    s32 alpha = couch_party_column_alpha(arg0);
++
++    gDisplayListHead = custom_texture_draw(gDisplayListHead,
++                                           (column == 2) ? CUSTOM_TEX_COUCH_PARTY_BUTTON : CUSTOM_TEX_LAN_GAME_BUTTON,
++                                           arg0->column + picture->dX, arg0->row + picture->dY, picture->width,
++                                           picture->height, 255, 255, 255, alpha);
++    // The rows below the picture, and the arrow (stock drawing, minus the picture).
++    if ((arg0->state == 1) || (arg0->state == 4)) {
++        gDisplayListHead = func_8009BC9C(gDisplayListHead, D_800E8234[(column * 2) + 0] + 1, arg0->column, arg0->row,
++                                         2, arg0->param1);
++        gDisplayListHead = func_8009BC9C(gDisplayListHead, D_800E8234[(column * 2) + 1], arg0->column, arg0->row, 2,
++                                         arg0->param1);
++    } else {
++        gDisplayListHead =
++            render_menu_textures(gDisplayListHead, D_800E8234[(column * 2) + 0] + 1, arg0->column, arg0->row);
++        gDisplayListHead = render_menu_textures(gDisplayListHead, D_800E8234[(column * 2) + 1], arg0->column, arg0->row);
++    }
++}
++
+ // Couch Party: covers the "3P" picture at the top of the third main menu
+ // column with the mode's name. The VS / BATTLE rows below are kept.
+ void draw_couch_party_column_title(MenuItem* arg0, char* line1, char* line2) {
+@@ -10785,11 +10834,21 @@ void render_couch_cursor(MenuItem* arg0, s32 playerId) {
+             alpha = 255;
+         }
+     }
+-    // Frame, 4 pixels thick.
+-    gDisplayListHead = draw_box(gDisplayListHead, x0, y0, x1, y0 + 4, c[0], c[1], c[2], alpha);
+-    gDisplayListHead = draw_box(gDisplayListHead, x0, y1 - 4, x1, y1, c[0], c[1], c[2], alpha);
+-    gDisplayListHead = draw_box(gDisplayListHead, x0, y0 + 4, x0 + 4, y1 - 4, c[0], c[1], c[2], alpha);
+-    gDisplayListHead = draw_box(gDisplayListHead, x1 - 4, y0 + 4, x1, y1 - 4, c[0], c[1], c[2], alpha);
++    if (custom_texture_present(CUSTOM_TEX_CHARACTER_HIGHLIGHT_P1 + playerId)) {
++        // textures/character_highlight_pN.png: this player's own frame, as drawn.
++        gDisplayListHead = custom_texture_draw(gDisplayListHead, CUSTOM_TEX_CHARACTER_HIGHLIGHT_P1 + playerId, x0, y0,
++                                               x1 - x0, y1 - y0, 255, 255, 255, alpha);
++    } else if (custom_texture_present(CUSTOM_TEX_CHARACTER_HIGHLIGHT)) {
++        // textures/character_highlight.png: one frame for everyone, in the player's colour.
++        gDisplayListHead = custom_texture_draw(gDisplayListHead, CUSTOM_TEX_CHARACTER_HIGHLIGHT, x0, y0, x1 - x0,
++                                               y1 - y0, c[0], c[1], c[2], alpha);
++    } else {
++        // Frame, 4 pixels thick.
++        gDisplayListHead = draw_box(gDisplayListHead, x0, y0, x1, y0 + 4, c[0], c[1], c[2], alpha);
++        gDisplayListHead = draw_box(gDisplayListHead, x0, y1 - 4, x1, y1, c[0], c[1], c[2], alpha);
++        gDisplayListHead = draw_box(gDisplayListHead, x0, y0 + 4, x0 + 4, y1 - 4, c[0], c[1], c[2], alpha);
++        gDisplayListHead = draw_box(gDisplayListHead, x1 - 4, y0 + 4, x1, y1 - 4, c[0], c[1], c[2], alpha);
++    }
+     // Number tag in the top-left corner; moved along if players before this
+     // one share the portrait (only when unique characters are off).
+     {
+diff --git a/src/menu_items.h b/src/menu_items.h
+index 60979a675..4e8697527 100644
+--- a/src/menu_items.h
++++ b/src/menu_items.h
+@@ -509,6 +509,7 @@ void func_800A0DFC(void);
+ void func_800A0EB8(MenuItem*, s32);
+ void func_800A0FA4(MenuItem*, s32);
+ void draw_couch_party_column_title(MenuItem*, char* line1, char* line2);
++void draw_couch_party_column_picture(MenuItem*, s32 column);
+ void render_couch_cursor(MenuItem*, s32 playerId);
+ void update_couch_cursor(MenuItem*);
+ void func_800A10CC(MenuItem*);
+diff --git a/src/port/textures/CustomTextures.cpp b/src/port/textures/CustomTextures.cpp
+new file mode 100644
+index 000000000..7e9bdc463
+--- /dev/null
++++ b/src/port/textures/CustomTextures.cpp
+@@ -0,0 +1,115 @@
++#include "custom_textures.h"
++
++#include <cstdio>
++#include <cstring>
++#include <fstream>
++#include <iterator>
++#include <string>
++#include <vector>
++
++#include <libultraship/libultraship.h>
++#include <stb_image.h>
++#include "ship/Context.h"
++#include "spdlog/spdlog.h"
++
++namespace {
++
++// Largest picture accepted, per side. Bigger (HD) pictures than the slot they
++// go in are fine: they are scaled down when drawn.
++constexpr int kMaxSide = 512;
++
++struct CustomTexture {
++    const char* file;
++    int width = 0;
++    int height = 0;
++    bool present = false;
++};
++
++CustomTexture sTextures[CUSTOM_TEX_COUNT] = {
++    { "couch_party_button.png" },    { "lan_game_button.png" },       { "character_highlight.png" },
++    { "character_highlight_p1.png" }, { "character_highlight_p2.png" }, { "character_highlight_p3.png" },
++    { "character_highlight_p4.png" }, { "character_highlight_p5.png" }, { "character_highlight_p6.png" },
++    { "character_highlight_p7.png" }, { "character_highlight_p8.png" },
++};
++
++// The pixels live inside the exe's own memory, not on the heap: on Windows the
++// renderer only accepts low texture addresses that belong to a loaded module.
++alignas(16) uint8_t sPixels[CUSTOM_TEX_COUNT][kMaxSide * kMaxSide * 4];
++
++bool sLoaded = false;
++
++void LoadOne(int i, const std::string& dir) {
++    CustomTexture& t = sTextures[i];
++    std::string path = dir + "/" + t.file;
++    std::ifstream in(path, std::ios::binary);
++    if (!in) {
++        return; // not there: the built-in picture is used
++    }
++    std::vector<unsigned char> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
++    int w = 0;
++    int h = 0;
++    unsigned char* rgba = stbi_load_from_memory(bytes.data(), (int) bytes.size(), &w, &h, nullptr, 4);
++    if (rgba == nullptr) {
++        SPDLOG_WARN("textures: can't read {} ({}), using the built-in picture", path, stbi_failure_reason());
++        return;
++    }
++    if ((w <= 0) || (h <= 0) || (w > kMaxSide) || (h > kMaxSide)) {
++        SPDLOG_WARN("textures: {} is {}x{}, the most is {}x{}; using the built-in picture", path, w, h, kMaxSide,
++                    kMaxSide);
++        stbi_image_free(rgba);
++        return;
++    }
++    memcpy(sPixels[i], rgba, (size_t) w * h * 4);
++    stbi_image_free(rgba);
++    t.width = w;
++    t.height = h;
++    t.present = true;
++    SPDLOG_INFO("textures: using {} ({}x{})", path, w, h);
++}
++
++void LoadAll() {
++    if (sLoaded) {
++        return;
++    }
++    sLoaded = true;
++    const std::string dir = Ship::Context::GetPathRelativeToAppDirectory("textures");
++    for (int i = 0; i < CUSTOM_TEX_COUNT; i++) {
++        LoadOne(i, dir);
++    }
++}
++
++} // namespace
++
++extern "C" bool custom_texture_present(CustomTextureId id) {
++    LoadAll();
++    return (id >= 0) && (id < CUSTOM_TEX_COUNT) && sTextures[id].present;
++}
++
++extern "C" Gfx* custom_texture_draw(Gfx* dl, CustomTextureId id, s32 x, s32 y, s32 w, s32 h, u8 r, u8 g, u8 b,
++                                    u8 a) {
++    if (!custom_texture_present(id) || (w <= 0) || (h <= 0)) {
++        return dl;
++    }
++    const CustomTexture& t = sTextures[id];
++    const bool scaled = (t.width != w) || (t.height != h);
++
++    gDPPipeSync(dl++);
++    gDPSetCycleType(dl++, G_CYC_1CYCLE);
++    gDPSetTexturePersp(dl++, G_TP_NONE);
++    gDPSetTextureLOD(dl++, G_TL_TILE);
++    gDPSetTextureLUT(dl++, G_TT_NONE);
++    gDPSetTextureConvert(dl++, G_TC_FILT);
++    gDPSetTextureFilter(dl++, scaled ? G_TF_BILERP : G_TF_POINT);
++    gDPSetAlphaCompare(dl++, G_AC_NONE);
++    gDPSetRenderMode(dl++, G_RM_XLU_SURF, G_RM_XLU_SURF2);
++    gDPSetCombineMode(dl++, G_CC_MODULATERGBA_PRIM, G_CC_MODULATERGBA_PRIM);
++    gDPSetPrimColor(dl++, 0, 0, r, g, b, a);
++    gDPLoadTextureTile(dl++, sPixels[id], G_IM_FMT_RGBA, G_IM_SIZ_32b, t.width, t.height, 0, 0, t.width - 1,
++                       t.height - 1, 0, G_TX_NOMIRROR | G_TX_CLAMP, G_TX_NOMIRROR | G_TX_CLAMP, G_TX_NOMASK,
++                       G_TX_NOMASK, G_TX_NOLOD, G_TX_NOLOD);
++    gSPWideTextureRectangle(dl++, x << 2, y << 2, (x + w) << 2, (y + h) << 2, G_TX_RENDERTILE, 0, 0,
++                            (t.width << 10) / w, (t.height << 10) / h);
++    gDPPipeSync(dl++);
++    gDPSetTextureFilter(dl++, G_TF_BILERP);
++    return dl;
++}
+diff --git a/src/port/textures/custom_textures.h b/src/port/textures/custom_textures.h
+new file mode 100644
+index 000000000..704015f97
+--- /dev/null
++++ b/src/port/textures/custom_textures.h
+@@ -0,0 +1,38 @@
++#ifndef SPAGHETTI_CUSTOM_TEXTURES_H
++#define SPAGHETTI_CUSTOM_TEXTURES_H
++
++// Replaceable menu pictures: PNG files in the "textures" folder next to the
++// game. A picture whose file is there is drawn instead of the built-in one;
++// when the file is missing (or can't be read) the game draws its own.
++// Files are read once, the first time the menus need them, so a change shows
++// after the game is restarted.
++
++#include <libultraship.h>
++#include <stdbool.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef enum {
++    CUSTOM_TEX_COUCH_PARTY_BUTTON,   // textures/couch_party_button.png
++    CUSTOM_TEX_LAN_GAME_BUTTON,      // textures/lan_game_button.png
++    CUSTOM_TEX_CHARACTER_HIGHLIGHT,  // textures/character_highlight.png (tinted per player)
++    CUSTOM_TEX_CHARACTER_HIGHLIGHT_P1, // textures/character_highlight_p1.png .. _p8.png (not tinted)
++    CUSTOM_TEX_CHARACTER_HIGHLIGHT_P8 = CUSTOM_TEX_CHARACTER_HIGHLIGHT_P1 + 7,
++    CUSTOM_TEX_COUNT
++} CustomTextureId;
++
++// True if the file for this picture was found and loaded.
++bool custom_texture_present(CustomTextureId id);
++
++// Draws the picture stretched over the screen rectangle (x, y, w, h) in the
++// menus' 320x240 space, multiplied by the colour (r, g, b) and alpha a.
++// Does nothing and returns dl unchanged if the picture isn't present.
++Gfx* custom_texture_draw(Gfx* dl, CustomTextureId id, s32 x, s32 y, s32 w, s32 h, u8 r, u8 g, u8 b, u8 a);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+-- 
+2.43.0
+

@@ -1,0 +1,37 @@
+From 9d4d19171b5644b56ce51f29214badb5b8dd7929 Mon Sep 17 00:00:00 2001
+From: T3chnobone <98963290+T3chnobone@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 11:32:17 +0000
+Subject: [PATCH] Keep the size of game-sized framebuffers when the window size
+ changes
+
+StartFrame reset every framebuffer to its original shape when the window
+or native size changed, including the ones the game had given its own
+pixel size (gfx_set_framebuffer_pixel_size). The game kept reading them at
+its own size, so split-screen views showed only their top-left corner.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Qq7B1sWVXKm11Pn2wqQeQQ
+---
+ src/fast/interpreter.cpp | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/src/fast/interpreter.cpp b/src/fast/interpreter.cpp
+index 890d452b..b2e5ed43 100644
+--- a/src/fast/interpreter.cpp
++++ b/src/fast/interpreter.cpp
+@@ -5020,6 +5020,12 @@ void Interpreter::StartFrame() {
+         mNativeDimensions.height != mPrevNativeDimensions.height) {
+ 
+         for (auto& fb : mFrameBuffers) {
++            if (fb.second.ownAspect) {
++                // Sized by the game (gfx_set_framebuffer_pixel_size): keep that size. Resetting it
++                // to the native shape here left split-screen views drawing into a 320x240 buffer
++                // that was then read as if it were full size: only the sky showed.
++                continue;
++            }
+             uint32_t width = fb.second.orig_width, height = fb.second.orig_height;
+             if (fb.second.resize) {
+                 AdjustWidthHeightForScale(width, height, fb.second.native_width, fb.second.native_height);
+-- 
+2.43.0
+

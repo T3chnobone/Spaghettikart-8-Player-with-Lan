@@ -1,0 +1,50 @@
+From ea8488cafe237790be7200c80abd58b0f6bf5335 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 29 Oct 2026 17:34:47 +0000
+Subject: [PATCH 15/17] LAN GAME: up to 4 players per PC
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Qq7B1uqfWVWykYRDDMiuXa
+---
+ docs/NETPLAY.md             | 2 +-
+ src/port/couch/LanSetup.cpp | 4 ++--
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/docs/NETPLAY.md b/docs/NETPLAY.md
+index 20c8741..ac19d19 100644
+--- a/docs/NETPLAY.md
++++ b/docs/NETPLAY.md
+@@ -12,7 +12,7 @@ controller driven and drawn with the game's own font:
+ - **YOUR ADDRESS** (host) / **HOST ADDRESS** (join, digit by digit with
+   Up/Down, A to edit).
+ - **YOUR NAME:** A to edit, Up/Down letter, Left/Right move, B delete, START done.
+-- **PLAYERS ON THIS PC:** 1–7, each with their own controller (ports 1..n on
++- **PLAYERS ON THIS PC:** 1–4, each with their own controller (ports 1..n on
+   that PC) and their own split-screen view. 8 players in all.
+ - **INPUT DELAY** (host): AUTO or 0–8 frames. **PORT:** 27064.
+ - Host: the panel lists who's in; **START RACE** (or START) when there are 2+.
+diff --git a/src/port/couch/LanSetup.cpp b/src/port/couch/LanSetup.cpp
+index 4aed004..4342783 100644
+--- a/src/port/couch/LanSetup.cpp
++++ b/src/port/couch/LanSetup.cpp
+@@ -75,7 +75,7 @@ std::string HostAddress() {
+     return CVarGetString("gLan.HostAddress", "192.168.1.2");
+ }
+ int LocalPlayers() {
+-    return std::clamp(CVarGetInteger("gLan.LocalPlayers", 1), 1, 7); // 7: room for at least one more PC
++    return std::clamp(CVarGetInteger("gLan.LocalPlayers", 1), 1, 4);
+ }
+ int Delay() { // -1 = auto
+     return std::clamp(CVarGetInteger("gLan.Delay", -1), -1, Netplay::kMaxInputDelay);
+@@ -237,7 +237,7 @@ void Change(int dir) {
+             if (ClientBusy() && S().GetPhase() != Phase::Lobby) {
+                 break;
+             }
+-            int n = std::clamp(LocalPlayers() + dir, 1, 7);
++            int n = std::clamp(LocalPlayers() + dir, 1, 4);
+             CVarSetInteger("gLan.LocalPlayers", n);
+             CVarSave();
+             S().SetLocalCount(n);
+-- 
+2.43.0
+

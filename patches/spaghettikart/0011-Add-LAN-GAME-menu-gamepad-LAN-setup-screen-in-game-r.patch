@@ -1,0 +1,3045 @@
+From 356e258e469497b89eaaaa969b56f3f456847f23 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 29 Oct 2026 09:23:07 +0000
+Subject: [PATCH 11/17] Add LAN GAME menu, gamepad LAN setup screen, in-game
+ record entry and top 10
+
+- Main menu: LAN GAME in the 4th column (VS / Battle).
+- LAN setup screen drawn with the game font, all controller-driven: host or
+  join, your address / host address, name, players on this PC, input delay,
+  port, games found on the network, who's in.
+- Netplay protocol v2: several players per PC (8 in all), players numbered
+  PC by PC, multi-pad input messages, per-PC hashes; UDP LAN discovery and a
+  local address lookup.
+- A LAN GAME runs like Couch Party in lockstep: every player's cursor on
+  character select, VS/Battle race, results; each PC draws only its own
+  players' views. Quitting ends the session for everyone.
+- Time Trial name entry is drawn in the game (no window), gamepad only, with
+  Z for the driver's name and START+B to skip.
+- DATA screen: a TOP 10 page (player name, driver, time, best lap) when a
+  track is opened; Z flips to the game's own records.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Qq7B1uqfWVWykYRDDMiuXa
+---
+ docs/COUCH_PARTY.md                      |   2 +
+ docs/LEADERBOARDS.md                     |  24 +-
+ docs/NETPLAY.md                          |  35 +-
+ src/main.c                               |   1 +
+ src/menu_items.c                         |  30 +-
+ src/menu_items.h                         |   6 +-
+ src/menus.c                              |  12 +-
+ src/port/Game.cpp                        |   7 +-
+ src/port/couch/CouchParty.cpp            | 119 +++-
+ src/port/couch/LanSetup.cpp              | 773 +++++++++++++++++++++++
+ src/port/couch/couch.h                   |  18 +-
+ src/port/couch/lan_setup.h               |  25 +
+ src/port/leaderboard/LeaderboardGame.cpp | 212 ++++++-
+ src/port/leaderboard/leaderboard_game.h  |   4 +
+ src/port/localplay/localplay_render.c    |  26 +-
+ src/port/netplay/Netplay.cpp             |  47 +-
+ src/port/netplay/Netplay.h               |   5 +
+ src/port/netplay/NetplayCore.cpp         | 323 +++++++++-
+ src/port/netplay/NetplayCore.h           |  73 ++-
+ src/port/ui/CouchWindow.cpp              |   4 +-
+ src/port/ui/GameDraw.h                   |  77 +++
+ src/port/ui/ImguiUI.cpp                  |  18 -
+ src/port/ui/LeaderboardWindow.cpp        | 156 -----
+ src/port/ui/LeaderboardWindow.h          |  29 -
+ src/port/ui/NetplayWindow.cpp            |   4 +-
+ 25 files changed, 1726 insertions(+), 304 deletions(-)
+ create mode 100644 src/port/couch/LanSetup.cpp
+ create mode 100644 src/port/couch/lan_setup.h
+ create mode 100644 src/port/ui/GameDraw.h
+
+diff --git a/docs/COUCH_PARTY.md b/docs/COUCH_PARTY.md
+index 748c011..b9c3f33 100644
+--- a/docs/COUCH_PARTY.md
++++ b/docs/COUCH_PARTY.md
+@@ -1,5 +1,7 @@
+ # Couch Party (VS and Battle for up to 8 players)
+ 
++(For players on several PCs, use **LAN GAME** next to it: see NETPLAY.md.)
++
+ VS races and Battles for 2 to 8 people on one PC, each with their own view.
+ 
+ ## Playing
+diff --git a/docs/LEADERBOARDS.md b/docs/LEADERBOARDS.md
+index f097bf7..22beddc 100644
+--- a/docs/LEADERBOARDS.md
++++ b/docs/LEADERBOARDS.md
+@@ -4,26 +4,26 @@ The 10 best Time Trial times for every track, saved on this PC.
+ 
+ ## Setting a time
+ 
+-Finish a Time Trial. If your time makes the top 10 for that track, a
+-**Time Trial Record** window opens showing your place, total time, lap splits
+-and where you'd land on the board.
++Finish a Time Trial. If your time makes the top 10 for that track, the game
++shows **NEW RECORD!** with your place, time, driver and where you land on the
++board, drawn in the game's own font. Enter your name with the controller:
+ 
+-- **Keyboard:** type your name and press Enter (or click Save).
+-- **Gamepad (player 1):** Up/Down change the letter, Left/Right or A/B move
+-  between letters, Start saves, Z skips. A on the last letter also saves.
+-- **Skip** (or closing the window) discards the time.
++- **Up/Down** change the letter, **Left/Right** move, **A** next letter
++  (A on the last letter saves), **B** delete.
++- **Z** fills in your driver's name (e.g. LUIGI).
++- **START** saves. **START+B** skips without saving.
+ 
+-While the window is open, player 1's controller only types the name, so the
+-results menu behind it waits. Your last name is remembered for next time.
++Your last name is filled in for you. While the entry is up, player 1's
++controller only types the name, so the results menu behind it waits.
+ 
+ Replays ("watch replay" after a Time Trial) are never recorded. Name entry is
+ also off during LAN netplay, so it can't hold up the other PCs.
+ 
+ ## Browsing
+ 
+-**On the DATA screen** (R on the main menu): a **Track Records** panel shows
+-the top 10 for the track the cursor is on, and follows it as you move between
+-tracks and into a track's records.
++**On the DATA screen** (R on the main menu): open a track and its **TOP 10**
++page comes up first: place, player name, driver and time, plus the best lap.
++**Z** flips to the game's own records page and back; B goes back as usual.
+ 
+ **In the Port Menu:**
+ **Enhancements → Leaderboards → Open Leaderboards.** Pick a track
+diff --git a/docs/NETPLAY.md b/docs/NETPLAY.md
+index 2cf4184..796da17 100644
+--- a/docs/NETPLAY.md
++++ b/docs/NETPLAY.md
+@@ -2,6 +2,35 @@
+ 
+ Play SpaghettiKart with up to **8 people on separate PCs** over a local network.
+ 
++## LAN GAME (from the main menu)
++
++The easy way: on the main menu go right to **LAN GAME** (the 4th column), pick
++**VS** (and a class) or **BATTLE**, and the LAN setup screen opens. It's all
++controller driven and drawn with the game's own font:
++
++- **GAME:** HOST or JOIN (Left/Right).
++- **YOUR ADDRESS** (host) / **HOST ADDRESS** (join, digit by digit with
++  Up/Down, A to edit).
++- **YOUR NAME:** A to edit, Up/Down letter, Left/Right move, B delete, START done.
++- **PLAYERS ON THIS PC:** 1–8, each with their own controller (ports 1..n on
++  that PC) and their own split-screen view. 8 players in all.
++- **INPUT DELAY** (host): AUTO or 0–8 frames. **PORT:** 27064.
++- Host: the panel lists who's in; **START RACE** (or START) when there are 2+.
++- Join: the panel lists **games found on this network** (UDP broadcast on the
++  same port); pick one and press A, or type the address and CONNECT. Z looks
++  again. B leaves.
++
++When the host starts, every PC goes to character select together; each player
++moves their own numbered cursor. Races run like Couch Party (VS: no CPUs,
++ends when all but one finish; Battle: last one with balloons wins), with each
++PC showing only its own players' views, laid out by its own split-screen
++setting. The results panel's Quit (or quitting from pause) ends the session
++for everyone.
++
++The netplay window below is still there for the 8-player Grand Prix.
++
++## Netplay window
++
+ There are two match types:
+ 
+ - **Big race (default, 2–8 players).** A Grand Prix where every kart that has a
+@@ -19,8 +48,10 @@ back out, and every PC runs the frame with the same inputs. This is
+ the same build, the races stay identical everywhere. Only inputs cross the
+ network (a few KB/s per player).
+ 
+-- Transport: TCP on port **27064** (configurable), Nagle disabled.
+-- Topology: star. Clients talk only to the host.
++- Transport: TCP on port **27064** (configurable), Nagle disabled. Finding
++  games uses UDP on the same port number.
++- Topology: star. Clients talk only to the host. Each PC can have several
++  players (protocol version 2); players are numbered PC by PC.
+ - Input delay: inputs take effect N frames after they are pressed (default 2),
+   which hides network latency. Raise it if play stutters over Wi-Fi.
+ - Desync detection: every 30 frames each PC hashes the RNG seed, menu state and
+diff --git a/src/main.c b/src/main.c
+index dc71fcc..231b95a 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -830,6 +830,7 @@ void race_logic_loop(void) {
+         func_800591B4();
+     }
+     func_80093E20();
++    leaderboard_render_race(); // Time Trial record: name entry
+ #if DVDL
+     display_dvdl();
+ #endif
+diff --git a/src/menu_items.c b/src/menu_items.c
+index 0e884c2..6808c39 100644
+--- a/src/menu_items.c
++++ b/src/menu_items.c
+@@ -1,4 +1,6 @@
+ #include "port/couch/couch.h"
++#include "port/leaderboard/leaderboard_game.h"
++#include "port/couch/lan_setup.h"
+ #include <libultraship.h>
+ #include "port/netplay/netrace.h"
+ #include <libultra/types.h>
+@@ -2602,6 +2604,7 @@ void func_80094A64(UNUSED struct GfxPool* pool) {
+             func_80099AEC();
+             break;
+     }
++    leaderboard_render_menus(); // DATA screen: the top 10 page
+ 
+     func_8009CA2C();
+     gCycleFlashMenu += 1;
+@@ -2719,7 +2722,10 @@ void setup_menus(void) {
+                 add_menu_item(CHARACTER_SELECT_MENU_2P_CURSOR, 0, 0, MENU_ITEM_PRIORITY_C);
+                 add_menu_item(CHARACTER_SELECT_MENU_3P_CURSOR, 0, 0, MENU_ITEM_PRIORITY_C);
+                 add_menu_item(CHARACTER_SELECT_MENU_4P_CURSOR, 0, 0, MENU_ITEM_PRIORITY_C);
+-                if (gCouchParty) {
++                if (gLanMenu && !gCouchParty) {
++                    add_menu_item(LAN_SETUP_SCREEN, 0, 0, MENU_ITEM_PRIORITY_F); // drawn over everything
++                }
++                if (gCouchParty || gLanMenu) {
+                     add_menu_item(COUCH_SELECT_MENU_5P_CURSOR, 0, 0, MENU_ITEM_PRIORITY_C);
+                     add_menu_item(COUCH_SELECT_MENU_6P_CURSOR, 0, 0, MENU_ITEM_PRIORITY_C);
+                     add_menu_item(COUCH_SELECT_MENU_7P_CURSOR, 0, 0, MENU_ITEM_PRIORITY_C);
+@@ -6489,13 +6495,13 @@ void render_menus(MenuItem* arg0) {
+             case MENU_ITEM_UI_3P_GAME:
+             case MENU_ITEM_UI_4P_GAME:
+                 var_a1 = arg0->type - MENU_ITEM_UI_1P_GAME;
+-                if (couch_enabled() && (var_a1 == 3)) {
+-                    break; // Couch Party replaces the 4P column...
+-                }
+                 func_800A8270(var_a1, arg0);
+                 func_800A0FA4(arg0, var_a1);
++                // Couch Party and LAN GAME relabel the 3P and 4P columns.
+                 if (couch_enabled() && (var_a1 == 2)) {
+-                    draw_couch_party_column_title(arg0); // ...and relabels 3P
++                    draw_couch_party_column_title(arg0, "COUCH", "PARTY");
++                } else if (couch_enabled() && (var_a1 == 3)) {
++                    draw_couch_party_column_title(arg0, "LAN", "GAME");
+                 }
+                 break;
+             case MENU_ITEM_UI_OK:
+@@ -6623,6 +6629,9 @@ void render_menus(MenuItem* arg0) {
+             case COUCH_SELECT_MENU_8P_CURSOR:
+                 render_couch_cursor(arg0, 4 + (arg0->type - COUCH_SELECT_MENU_5P_CURSOR));
+                 break;
++            case LAN_SETUP_SCREEN:
++                lan_setup_render();
++                break;
+             case CHARACTER_SELECT_MENU_OK:
+                 func_800A8564(arg0);
+                 gDisplayListHead =
+@@ -7079,7 +7088,7 @@ void func_800A0EB8(UNUSED MenuItem* arg0, s32 arg1) {
+ 
+ // Couch Party: covers the "3P" picture at the top of the third main menu
+ // column with the mode's name. The VS / BATTLE rows below are kept.
+-void draw_couch_party_column_title(MenuItem* arg0) {
++void draw_couch_party_column_title(MenuItem* arg0, char* line1, char* line2) {
+     s32 x = arg0->column;
+     s32 y = arg0->row;
+     s32 alpha = 255;
+@@ -7099,9 +7108,12 @@ void draw_couch_party_column_title(MenuItem* arg0) {
+     if (alpha < 128) {
+         return;
+     }
+-    set_text_color((gPlayerCount == COUCH_MENU_PLAYER_COUNT) ? TEXT_BLUE_GREEN_RED_CYCLE_1 : TEXT_YELLOW);
+-    print_text1_center_mode_1(x + 32, y + 22, "COUCH", 0, 0.62f, 0.75f);
+-    print_text1_center_mode_1(x + 32, y + 40, "PARTY", 0, 0.62f, 0.75f);
++    set_text_color((gPlayerCount == ((arg0->type == MENU_ITEM_UI_4P_GAME) ? COUCH_LAN_PLAYER_COUNT
++                                                                           : COUCH_MENU_PLAYER_COUNT))
++                       ? TEXT_BLUE_GREEN_RED_CYCLE_1
++                       : TEXT_YELLOW);
++    print_text1_center_mode_1(x + 32, y + 22, line1, 0, 0.62f, 0.75f);
++    print_text1_center_mode_1(x + 32, y + 40, line2, 0, 0.62f, 0.75f);
+ }
+ 
+ void func_800A0FA4(MenuItem* arg0, s32 arg1) {
+diff --git a/src/menu_items.h b/src/menu_items.h
+index a01c1e5..0895334 100644
+--- a/src/menu_items.h
++++ b/src/menu_items.h
+@@ -321,7 +321,9 @@ enum MENU_ITEM_TYPE {
+     COUCH_SELECT_MENU_5P_CURSOR,
+     COUCH_SELECT_MENU_6P_CURSOR,
+     COUCH_SELECT_MENU_7P_CURSOR,
+-    COUCH_SELECT_MENU_8P_CURSOR
++    COUCH_SELECT_MENU_8P_CURSOR,
++    // LAN GAME setup screen, over the character screen.
++    LAN_SETUP_SCREEN
+ };
+ 
+ enum LoadImgCompType {
+@@ -506,7 +508,7 @@ void func_800A0B80(MenuItem*);
+ void func_800A0DFC(void);
+ void func_800A0EB8(MenuItem*, s32);
+ void func_800A0FA4(MenuItem*, s32);
+-void draw_couch_party_column_title(MenuItem*);
++void draw_couch_party_column_title(MenuItem*, char* line1, char* line2);
+ void render_couch_cursor(MenuItem*, s32 playerId);
+ void update_couch_cursor(MenuItem*);
+ void func_800A10CC(MenuItem*);
+diff --git a/src/menus.c b/src/menus.c
+index 71f63a8..9daba8a 100644
+--- a/src/menus.c
++++ b/src/menus.c
+@@ -1329,8 +1329,8 @@ void main_menu_act(struct Controller* controller, u16 controllerIdx) {
+                 break;
+             }
+             case MAIN_MENU_PLAYER_SELECT: {
+-                // Couch Party takes the 3rd column; the 3P and 4P columns go.
+-                if ((btnAndStick & R_JPAD) && gPlayerCount < (couch_enabled() ? COUCH_MENU_PLAYER_COUNT : 4)) {
++                // Couch Party takes the 3rd column and LAN GAME the 4th (instead of 3P and 4P).
++                if ((btnAndStick & R_JPAD) && gPlayerCount < 4) {
+                     gPlayerCount += 1;
+                     reset_cycle_flash_menu();
+                     play_sound2(SOUND_MENU_CURSOR_MOVE);
+@@ -1340,10 +1340,8 @@ void main_menu_act(struct Controller* controller, u16 controllerIdx) {
+                     reset_cycle_flash_menu();
+                     play_sound2(SOUND_MENU_CURSOR_MOVE);
+                 }
+-                if (couch_enabled() && gPlayerCount > COUCH_MENU_PLAYER_COUNT) {
+-                    gPlayerCount = COUCH_MENU_PLAYER_COUNT;
+-                }
+                 gCouchParty = couch_enabled() && (gPlayerCount == COUCH_MENU_PLAYER_COUNT);
++                gLanMenu = couch_enabled() && (gPlayerCount == COUCH_LAN_PLAYER_COUNT);
+                 // L800B2B38
+                 gPlayerCountSelection1 = gPlayerCount;
+                 switch (gPlayerCountSelection1) {
+@@ -1598,7 +1596,7 @@ void player_select_menu_act(struct Controller* controller, u16 controllerIdx) {
+             case PLAYER_SELECT_MENU_MAIN: {
+                 savedSelection = gCharacterGridSelections[controllerIdx];
+                 if (savedSelection == 0) {
+-                    if (btnAndStick & B_BUTTON) {
++                    if ((btnAndStick & B_BUTTON) && couch_allow_back()) {
+                         func_8009E208();
+                         play_sound2(0x49008002);
+                     }
+@@ -1609,7 +1607,7 @@ void player_select_menu_act(struct Controller* controller, u16 controllerIdx) {
+                     if (gCharacterGridIsSelected[controllerIdx]) {
+                         gCharacterGridIsSelected[controllerIdx] = false;
+                         play_sound2(SOUND_MENU_GO_BACK);
+-                    } else {
++                    } else if (couch_allow_back()) { // LAN GAME: not back to the menu mid-match
+                         func_8009E208();
+                         play_sound2(0x49008002);
+                     }
+diff --git a/src/port/Game.cpp b/src/port/Game.cpp
+index a049e4d..1bf4bc8 100644
+--- a/src/port/Game.cpp
++++ b/src/port/Game.cpp
+@@ -45,7 +45,6 @@ extern "C" {
+ #include "port/leaderboard/leaderboard_game.h"
+ #include "port/couch/couch.h"
+ }
+-#include "port/ui/LeaderboardWindow.h"
+ 
+ #ifdef _WIN32
+ #include <locale.h>
+@@ -983,8 +982,9 @@ static void ResetToMenus(bool forNetplay) {
+     }
+ 
+     if (forNetplay) {
+-        // Everyone lands on the main menu together, whatever their intro settings.
+-        gMenuSelection = MAIN_MENU;
++        // Everyone lands on the main menu together, whatever their intro settings
++        // (a LAN GAME goes straight to character select).
++        gMenuSelection = couch_lan_mode() ? CHARACTER_SELECT_MENU : MAIN_MENU;
+         gDemoMode = DEMO_MODE_INACTIVE;
+     }
+     // Re-enter through the intro's own transition protocol (see HM_TickIntro):
+@@ -1013,7 +1013,6 @@ void push_frame() {
+     localplay_update(); // local multiplayer settings, gamepads, monitors
+     leaderboard_tick();  // Time Trial leaderboards: name entry after a record
+     couch_menu_tick();   // Couch Party lobby and results
+-    GameUI::UpdateTrackRecordsOverlay(); // leaderboards beside the DATA screens
+     if (Netplay_Update()) {
+         // A LAN match starts now: all machines reset to the same state and the
+         // next game frame is lockstep frame 0.
+diff --git a/src/port/couch/CouchParty.cpp b/src/port/couch/CouchParty.cpp
+index 2c50498..040754e 100644
+--- a/src/port/couch/CouchParty.cpp
++++ b/src/port/couch/CouchParty.cpp
+@@ -23,6 +23,8 @@ extern "C" {
+ #include <sounds.h>
+ #include "audio/external.h"
+ #include "port/netplay/netrace.h"
++#include "port/netplay/Netplay.h"
++#include "port/couch/lan_setup.h"
+ }
+ 
+ namespace GameUI {
+@@ -31,6 +33,7 @@ void ShowCouchResults(bool show);
+ 
+ extern "C" {
+ s32 gCouchParty = 0;
++s32 gLanMenu = 0;
+ }
+ 
+ namespace Couch {
+@@ -55,6 +58,10 @@ int sCount = 0;
+ std::array<int, kMaxPlayers> sPorts{};
+ std::array<int, kMaxPlayers> sCharacters{};
+ bool sOwnsBigRace = false;
++// LAN GAME: a couch-style match where the players are spread over several PCs
++// (all running in lockstep). Roster = every session player, in order.
++bool sLanMode = false;
++bool sLanEnded = false; // the session dropped; tidy up once back on the menus
+ bool sWasCouch = false;
+ // Take the buttons already held as the starting state (e.g. A held while
+ // driving when the results appear) so only new presses count.
+@@ -198,6 +205,20 @@ void FreshRoster() {
+     gCharacterSelections[0] = sCharacterGridOrder[0];
+ }
+ 
++// LAN GAME: everyone in the session has a cursor from the start.
++void LanRoster(int total) {
++    sSlotPort.fill(-1);
++    sWaitRelease.fill(false);
++    for (int k = 0; k < kMaxPlayers; k++) {
++        bool in = k < total;
++        sSlotPort[k] = in ? k : -1;
++        gCharacterGridSelections[k] = (s8) (in ? k + 1 : 0);
++        gCharacterGridIsSelected[k] = false;
++        gCharacterSelections[k] = sCharacterGridOrder[k];
++    }
++    gPlayerSelectMenuSelection = PLAYER_SELECT_MENU_MAIN;
++}
++
+ // Character screen input: joins and leaves from the raw ports, then each
+ // player's controller is put in their slot for the stock screen code.
+ void SelectInput(OSContPad* pads) {
+@@ -209,7 +230,9 @@ void SelectInput(OSContPad* pads) {
+         pressed[port] = held & ~sRawPrev[port];
+         sRawPrev[port] = held;
+     }
+-    bool canChange = !is_screen_being_faded();
++    // LAN GAME: the players are fixed by the session, and pads already arrive
++    // in player order from every PC.
++    bool canChange = !is_screen_being_faded() && !sLanMode;
+     bool someoneLeft = false;
+     if (canChange) {
+         for (int port = 0; port < MAXCONTROLLERS; port++) {
+@@ -246,7 +269,7 @@ void SelectInput(OSContPad* pads) {
+ 
+ // Leaving the character screen for the course select: these players race.
+ void CommitRoster() {
+-    sCount = JoinedCount();
++    sCount = JoinedCount(); // LAN GAME: ports are the global player numbers
+     for (int k = 0; k < kMaxPlayers; k++) {
+         sPorts[k] = k < sCount ? sSlotPort[k] : -1;
+         sCharacters[k] = k < sCount ? (gCharacterSelections[k] & 7) : k;
+@@ -265,6 +288,8 @@ void ReleaseBigRace() {
+ 
+ void CouchOff() {
+     gCouchParty = 0;
++    sLanMode = false;
++    sLanEnded = false;
+     ReleaseBigRace();
+     sCommitted = false;
+     sCount = 0;
+@@ -328,6 +353,9 @@ void RunPending() {
+                     break;
+                 default:
+                     func_80290338();
++                    if (sLanMode) {
++                        Netplay_EndSession("Match over"); // every PC quits on the same frame
++                    }
+                     break;
+             }
+             play_sound2(SOUND_MENU_OK_CLICKED);
+@@ -369,7 +397,49 @@ using namespace Couch;
+ // ------------------------------------------------------------------ C API
+ 
+ extern "C" bool couch_enabled(void) {
+-    return CVarGetInteger("gCouchParty.Disabled", 0) == 0 && Netplay::Get().GetRole() == Netplay::Role::None;
++    return CVarGetInteger("gCouchParty.Disabled", 0) == 0 &&
++           (Netplay::Get().GetRole() == Netplay::Role::None || sLanMode);
++}
++
++extern "C" bool couch_lan_mode(void) {
++    return sLanMode;
++}
++
++extern "C" s32 couch_menu_column(void) {
++    return sLanMode ? COUCH_LAN_PLAYER_COUNT : COUCH_MENU_PLAYER_COUNT;
++}
++
++// Called on every PC when a LAN GAME session starts (same frame everywhere).
++extern "C" void couch_lan_begin(s32 total) {
++    gCouchParty = 1;
++    gLanMenu = 0;
++    sLanMode = true;
++    sLanEnded = false;
++    sWasCouch = true;
++    sCommitted = false;
++    sCount = 0;
++    sResults = Results{};
++    sWins.fill(0);
++    sFinishOrder.clear();
++    sEliminated.clear();
++    LanRoster(std::clamp<int>(total, 1, kMaxPlayers));
++    GameUI::ShowCouchResults(false);
++}
++
++extern "C" void couch_lan_end(void) {
++    if (sLanMode) {
++        sLanEnded = true;
++    }
++}
++
++// This PC's players (LAN GAME: its share of the session; otherwise everyone).
++extern "C" bool couch_local_players(s32* first, s32* count) {
++    if (!sLanMode || !Netplay_IsInGame()) {
++        return false;
++    }
++    *first = Netplay_LocalFirst();
++    *count = Netplay_LocalCount();
++    return true;
+ }
+ 
+ extern "C" bool couch_race_active(void) {
+@@ -389,6 +459,10 @@ extern "C" bool couch_owns_big_race(void) {
+ }
+ 
+ extern "C" void couch_menu_tick(void) {
++    lan_setup_tick();
++    if (sLanEnded && gGamestate < RACING) {
++        CouchOff(); // the LAN session is over
++    }
+     if (sWasCouch && !gCouchParty) {
+         CouchOff();
+     }
+@@ -414,7 +488,9 @@ extern "C" void couch_menu_tick(void) {
+     if (sResults.active) {
+         GameUI::ShowCouchResults(true);
+     }
+-    RunPending();
++    if (!sLanMode) {
++        RunPending(); // a mouse click on the results (LAN: game frames only, below)
++    }
+ }
+ 
+ extern "C" void couch_filter_pads(OSContPad* pads) {
+@@ -428,6 +504,11 @@ extern "C" void couch_filter_pads(OSContPad* pads) {
+             sMenuPrev[port] = held;
+         }
+     }
++    if (lan_setup_active()) {
++        lan_setup_input(pads); // the LAN GAME setup screen has the controllers
++        std::memset(pads, 0, sizeof(OSContPad) * MAXCONTROLLERS);
++        return;
++    }
+     if (!gCouchParty) {
+         return;
+     }
+@@ -455,6 +536,7 @@ extern "C" void couch_filter_pads(OSContPad* pads) {
+             ResultsInput(pads);
+         }
+         std::memset(pads, 0, sizeof(OSContPad) * MAXCONTROLLERS);
++        RunPending(); // same game frame on every PC
+     }
+ }
+ 
+@@ -490,7 +572,14 @@ extern "C" void couch_on_load_menu(s32 menuSelection) {
+     if (!gCouchParty) {
+         return;
+     }
+-    switch (NormalizeMenu(menuSelection)) {
++    s32 menu = NormalizeMenu(menuSelection);
++    if (menu == MAIN_MENU && sLanMode) {
++        // A LAN GAME ends back at the main menu (every PC on the same frame).
++        Netplay_EndSession("Back to the main menu");
++        CouchOff();
++        return;
++    }
++    switch (menu) {
+         case CHARACTER_SELECT_MENU:
+             // From the main menu: start again with just player 1.
+             sFreshSelect = (gGamestate == 0) && (gMenuFadeType == MENU_FADE_TYPE_MAIN);
+@@ -498,8 +587,8 @@ extern "C" void couch_on_load_menu(s32 menuSelection) {
+         case MAIN_MENU:
+         case COURSE_SELECT_MENU:
+             // Back on the menus: the couch column again (races run as 1P).
+-            gPlayerCount = COUCH_MENU_PLAYER_COUNT;
+-            gPlayerCountSelection1 = COUCH_MENU_PLAYER_COUNT;
++            gPlayerCount = (s8) couch_menu_column();
++            gPlayerCountSelection1 = couch_menu_column();
+             gScreenModeSelection = SCREEN_MODE_3P_4P_SPLITSCREEN;
+             break;
+         default:
+@@ -514,6 +603,18 @@ extern "C" void couch_on_menu_loaded(s32 menuSelection) {
+     }
+     sCommitted = false; // choosing again; the roster is committed on the way out
+     sRawPrev.fill(0xFFFF); // buttons held coming in don't count as presses
++    if (sLanMode) {
++        // Kept from couch_lan_begin; after a race, everyone picks again.
++        for (int k = 0; k < kMaxPlayers; k++) {
++            gCharacterGridIsSelected[k] = false;
++            if (sSlotPort[k] < 0) {
++                gCharacterGridSelections[k] = 0;
++            } else if (gCharacterGridSelections[k] == 0) {
++                gCharacterGridSelections[k] = (s8) (k + 1);
++            }
++        }
++        return;
++    }
+     if (sFreshSelect) {
+         FreshRoster();
+         return;
+@@ -556,6 +657,10 @@ extern "C" bool couch_portrait_spot(s32 playerIdx, s32* column, s32* row) {
+     return true;
+ }
+ 
++extern "C" bool couch_allow_back(void) {
++    return !(sLanMode && couch_select_active()); // LAN: leaving is from the results/pause menu
++}
++
+ extern "C" bool couch_select_can_finish(void) {
+     return !couch_select_active() || JoinedCount() >= 2;
+ }
+diff --git a/src/port/couch/LanSetup.cpp b/src/port/couch/LanSetup.cpp
+new file mode 100644
+index 0000000..b401061
+--- /dev/null
++++ b/src/port/couch/LanSetup.cpp
+@@ -0,0 +1,773 @@
++// LAN GAME setup screen (see lan_setup.h): host or join a game on the local
++// network with a controller, drawn with the game's own font.
++
++#include "lan_setup.h"
++#include "couch.h"
++
++#include <algorithm>
++#include <array>
++#include <cstdio>
++#include <cstring>
++#include <string>
++
++#include <libultraship/libultraship.h>
++#include "port/netplay/NetplayCore.h"
++#include "port/ui/GameDraw.h"
++
++extern "C" {
++#include "main.h"
++#include "menus.h"
++#include "menu_items.h"
++#include <defines.h>
++#include <sounds.h>
++#include "audio/external.h"
++}
++
++namespace {
++
++using Netplay::Phase;
++using Netplay::Role;
++
++enum class Mode { Host = 0, Join = 1 };
++enum class Edit { None, Name, Address, Port };
++
++// Rows (the list below them, when joining, follows the last row).
++enum Row { kRowGame, kRowAddress, kRowName, kRowPlayers, kRowDelay, kRowPort, kRowButton, kNumRows };
++
++constexpr int kNameMax = 12;
++const char kNameCharset[] = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-.!";
++
++struct State {
++    bool active = false;
++    Mode mode = Mode::Host;
++    int row = kRowGame;
++    int listIndex = -1; // join: highlighted found game (-1: on the rows)
++    Edit edit = Edit::None;
++    int editCursor = 0;
++    std::string editText;   // name being edited
++    std::array<int, 12> addrDigits{};
++    std::array<int, 5> portDigits{};
++    std::string message;    // last error / hint
++    int messageTimer = 0;
++    std::string myAddress;
++    int addressTimer = 0;
++    // Input edges for all local ports together.
++    std::array<uint16_t, MAXCONTROLLERS> prevButtons{};
++    std::array<int8_t, MAXCONTROLLERS> prevDirX{}, prevDirY{};
++    int repeat = 0;
++};
++State sState;
++Netplay::Discovery sDiscovery;
++
++Netplay::Session& S() {
++    return Netplay::Get();
++}
++
++// ---- settings (CVars) ----
++std::string Name() {
++    std::string n = CVarGetString("gLan.Name", "PLAYER");
++    return n.empty() ? std::string("PLAYER") : n;
++}
++uint16_t Port() {
++    return (uint16_t) std::clamp(CVarGetInteger("gLan.Port", Netplay::kDefaultPort), 1024, 65535);
++}
++std::string HostAddress() {
++    return CVarGetString("gLan.HostAddress", "192.168.1.2");
++}
++int LocalPlayers() {
++    return std::clamp(CVarGetInteger("gLan.LocalPlayers", 1), 1, 8);
++}
++int Delay() { // -1 = auto
++    return std::clamp(CVarGetInteger("gLan.Delay", -1), -1, Netplay::kMaxInputDelay);
++}
++
++void Message(const std::string& text) {
++    sState.message = text;
++    sState.messageTimer = 60 * 6;
++}
++
++std::string Advert() {
++    if (gModeSelection == BATTLE) {
++        return "BATTLE";
++    }
++    static const char* kCC[] = { "50CC", "100CC", "150CC", "EXTRA" };
++    return std::string("VS ") + kCC[std::clamp<int>(gCCSelection, 0, 3)];
++}
++
++void AddressToDigits(const std::string& addr) {
++    int o[4] = { 0, 0, 0, 0 };
++    std::sscanf(addr.c_str(), "%d.%d.%d.%d", &o[0], &o[1], &o[2], &o[3]);
++    for (int i = 0; i < 4; i++) {
++        int v = std::clamp(o[i], 0, 255);
++        sState.addrDigits[i * 3 + 0] = v / 100;
++        sState.addrDigits[i * 3 + 1] = (v / 10) % 10;
++        sState.addrDigits[i * 3 + 2] = v % 10;
++    }
++}
++
++std::string DigitsToAddress() {
++    char buf[32];
++    int o[4];
++    for (int i = 0; i < 4; i++) {
++        o[i] = std::min(255, sState.addrDigits[i * 3] * 100 + sState.addrDigits[i * 3 + 1] * 10 +
++                                 sState.addrDigits[i * 3 + 2]);
++    }
++    std::snprintf(buf, sizeof(buf), "%d.%d.%d.%d", o[0], o[1], o[2], o[3]);
++    return buf;
++}
++
++// ---- session control ----
++void StartHosting() {
++    sDiscovery.Stop();
++    S().SetLocalCount(LocalPlayers());
++    int d = Delay();
++    S().SetInputDelay(d < 0 ? 2 : d);
++    S().SetLobbyOptions(0);
++    S().SetAdvert(Advert());
++    if (!S().Host(Port(), Name())) {
++        Message(S().LastError());
++    }
++}
++
++void StartJoinMode() {
++    S().Disconnect();
++    S().SetLocalCount(LocalPlayers());
++    if (!sDiscovery.Start(Port())) {
++        Message("Can't look for games on this network");
++    }
++}
++
++void JoinGame(const std::string& address, uint16_t port) {
++    S().SetLocalCount(LocalPlayers());
++    if (!S().Join(address, port, Name())) {
++        Message(S().LastError());
++    } else {
++        Message("Connecting to " + address);
++    }
++}
++
++bool ClientBusy() {
++    return S().GetRole() == Role::Client; // connecting or in the host's lobby
++}
++
++void Enter() {
++    sState = State{};
++    sState.active = true;
++    sState.mode = CVarGetInteger("gLan.Mode", 0) == 1 ? Mode::Join : Mode::Host;
++    sState.prevButtons.fill(0xFFFF); // the A that got us here doesn't count
++    sState.myAddress = Netplay::LocalAddress();
++    if (sState.mode == Mode::Host) {
++        StartHosting();
++    } else {
++        StartJoinMode();
++    }
++}
++
++void Leave() {
++    sState.active = false;
++    sDiscovery.Stop();
++    if (!S().IsInGame()) {
++        S().Disconnect();
++    }
++}
++
++void SwitchMode(Mode m) {
++    if (sState.mode == m) {
++        return;
++    }
++    sState.mode = m;
++    sState.listIndex = -1;
++    CVarSetInteger("gLan.Mode", m == Mode::Join ? 1 : 0);
++    CVarSave();
++    if (m == Mode::Host) {
++        StartHosting();
++    } else {
++        StartJoinMode();
++    }
++}
++
++// Rows the cursor can stop on in this mode.
++bool RowUsed(int row) {
++    if (sState.mode == Mode::Host) {
++        return row != kRowAddress; // your own address is just shown
++    }
++    return row != kRowDelay; // the host sets the delay
++}
++
++void MoveRow(int dir) {
++    if (sState.listIndex >= 0) {
++        int n = (int) sDiscovery.Games().size();
++        sState.listIndex += dir;
++        if (sState.listIndex < 0) {
++            sState.listIndex = -1;
++            sState.row = kRowButton;
++        } else if (sState.listIndex >= n) {
++            sState.listIndex = n - 1;
++        }
++        play_sound2(SOUND_MENU_CURSOR_MOVE);
++        return;
++    }
++    int r = sState.row;
++    do {
++        r += dir;
++    } while (r >= 0 && r < kNumRows && !RowUsed(r));
++    if (r >= kNumRows) {
++        if (sState.mode == Mode::Join && !sDiscovery.Games().empty()) {
++            sState.listIndex = 0;
++            play_sound2(SOUND_MENU_CURSOR_MOVE);
++        }
++        return;
++    }
++    if (r < 0) {
++        return;
++    }
++    sState.row = r;
++    play_sound2(SOUND_MENU_CURSOR_MOVE);
++}
++
++void Change(int dir) {
++    switch (sState.row) {
++        case kRowGame:
++            if (!ClientBusy()) {
++                SwitchMode(sState.mode == Mode::Host ? Mode::Join : Mode::Host);
++                play_sound2(SOUND_MENU_CURSOR_MOVE);
++            }
++            break;
++        case kRowPlayers: {
++            if (ClientBusy() && S().GetPhase() != Phase::Lobby) {
++                break;
++            }
++            int n = std::clamp(LocalPlayers() + dir, 1, 8);
++            CVarSetInteger("gLan.LocalPlayers", n);
++            CVarSave();
++            S().SetLocalCount(n);
++            play_sound2(SOUND_MENU_CURSOR_MOVE);
++            break;
++        }
++        case kRowDelay: {
++            int d = std::clamp(Delay() + dir, -1, Netplay::kMaxInputDelay);
++            CVarSetInteger("gLan.Delay", d);
++            CVarSave();
++            S().SetInputDelay(d < 0 ? 2 : d);
++            play_sound2(SOUND_MENU_CURSOR_MOVE);
++            break;
++        }
++        default:
++            break;
++    }
++}
++
++void Activate() {
++    switch (sState.row) {
++        case kRowName:
++            if (ClientBusy()) {
++                break;
++            }
++            sState.edit = Edit::Name;
++            sState.editText = Name();
++            sState.editCursor = 0;
++            play_sound2(SOUND_MENU_SELECT);
++            break;
++        case kRowAddress:
++            if (sState.mode == Mode::Join && !ClientBusy()) {
++                sState.edit = Edit::Address;
++                AddressToDigits(HostAddress());
++                sState.editCursor = 0;
++                play_sound2(SOUND_MENU_SELECT);
++            }
++            break;
++        case kRowPort:
++            if (!ClientBusy()) {
++                sState.edit = Edit::Port;
++                int p = Port();
++                for (int i = 4; i >= 0; i--) {
++                    sState.portDigits[i] = p % 10;
++                    p /= 10;
++                }
++                sState.editCursor = 0;
++                play_sound2(SOUND_MENU_SELECT);
++            }
++            break;
++        case kRowButton:
++            if (sState.mode == Mode::Host) {
++                if (S().GetRole() != Role::Host) {
++                    StartHosting();
++                } else if (S().PlayerCount() < 2) {
++                    Message("Waiting for another player to join");
++                } else if (S().PlayerCount() > 8) {
++                    Message("Too many players - 8 at most");
++                } else if (S().RequestStart()) {
++                    play_sound2(SOUND_MENU_OK_CLICKED);
++                }
++            } else if (!ClientBusy()) {
++                JoinGame(HostAddress(), Port());
++                play_sound2(SOUND_MENU_SELECT);
++            }
++            break;
++        default:
++            Change(1);
++            break;
++    }
++}
++
++void FinishEdit(bool keep) {
++    if (keep) {
++        switch (sState.edit) {
++            case Edit::Name: {
++                std::string n = sState.editText;
++                while (!n.empty() && n.back() == ' ') {
++                    n.pop_back();
++                }
++                if (n.empty()) {
++                    n = "PLAYER";
++                }
++                CVarSetString("gLan.Name", n.c_str());
++                // A new name shows once the lobby is reopened (only if nobody's in yet).
++                if (S().GetRole() == Role::Host && S().PcCount() <= 1) {
++                    StartHosting();
++                }
++                break;
++            }
++            case Edit::Address:
++                CVarSetString("gLan.HostAddress", DigitsToAddress().c_str());
++                break;
++            case Edit::Port: {
++                int p = 0;
++                for (int d : sState.portDigits) {
++                    p = p * 10 + d;
++                }
++                CVarSetInteger("gLan.Port", std::clamp(p, 1024, 65535));
++                if (sState.mode == Mode::Host) {
++                    StartHosting();
++                } else {
++                    StartJoinMode();
++                }
++                break;
++            }
++            default:
++                break;
++        }
++        CVarSave();
++        play_sound2(SOUND_MENU_OK_CLICKED);
++    } else {
++        play_sound2(SOUND_MENU_GO_BACK);
++    }
++    sState.edit = Edit::None;
++}
++
++int CharsetIndex(char c) {
++    const char* p = std::strchr(kNameCharset, c);
++    return (p != nullptr && c != '\0') ? (int) (p - kNameCharset) : 0;
++}
++
++void EditInput(uint16_t pressed, int dirX, int dirY) {
++    if (sState.edit == Edit::Name) {
++        std::string& t = sState.editText;
++        if ((int) t.size() <= sState.editCursor) {
++            t.resize(sState.editCursor + 1, ' ');
++        }
++        if (dirY != 0) {
++            int n = (int) sizeof(kNameCharset) - 1;
++            int idx = (CharsetIndex(t[sState.editCursor]) + (dirY > 0 ? 1 : n - 1)) % n;
++            t[sState.editCursor] = kNameCharset[idx];
++        }
++        if (dirX > 0 || (pressed & A_BUTTON)) {
++            if ((pressed & A_BUTTON) && sState.editCursor >= kNameMax - 1) {
++                FinishEdit(true);
++                return;
++            }
++            sState.editCursor = std::min(sState.editCursor + 1, kNameMax - 1);
++        }
++        if (dirX < 0) {
++            sState.editCursor = std::max(sState.editCursor - 1, 0);
++        }
++        if (pressed & B_BUTTON) {
++            // Delete this letter; B on an empty name cancels.
++            if (t.find_first_not_of(' ') == std::string::npos) {
++                FinishEdit(false);
++                return;
++            }
++            t.erase(sState.editCursor, 1);
++            sState.editCursor = std::max(sState.editCursor - 1, 0);
++        }
++        if (pressed & START_BUTTON) {
++            FinishEdit(true);
++        }
++        return;
++    }
++    int* digits = sState.edit == Edit::Address ? sState.addrDigits.data() : sState.portDigits.data();
++    int count = sState.edit == Edit::Address ? 12 : 5;
++    if (dirY != 0) {
++        int& d = digits[sState.editCursor];
++        d = (d + (dirY > 0 ? 1 : 9)) % 10;
++    }
++    if (dirX != 0) {
++        sState.editCursor = std::clamp(sState.editCursor + dirX, 0, count - 1);
++    }
++    if (pressed & (A_BUTTON | START_BUTTON)) {
++        FinishEdit(true);
++    } else if (pressed & B_BUTTON) {
++        FinishEdit(false);
++    }
++}
++
++// ---- drawing ----
++using GameDraw::Box;
++using GameDraw::Text;
++using GameDraw::TextCentered;
++
++// A small filled triangle pointing left (dir < 0) or right.
++void Arrow(int x, int yMid, int dir, int r, int g, int b) {
++    for (int i = 0; i < 5; i++) {
++        int h = 5 - i;
++        int col = dir < 0 ? x + i : x + 4 - i;
++        Box(col, yMid - h, col + 1, yMid + h, r, g, b, 255);
++    }
++}
++
++std::string DelayText() {
++    int d = Delay();
++    return d < 0 ? std::string("AUTO") : std::to_string(d);
++}
++
++} // namespace
++
++// ------------------------------------------------------------------ C API
++
++extern "C" bool lan_setup_active(void) {
++    return gLanMenu && !gCouchParty && gGamestate < RACING && gMenuSelection == CHARACTER_SELECT_MENU &&
++           !S().IsInGame();
++}
++
++extern "C" bool couch_lan_hosting(void) {
++    return gLanMenu && S().GetRole() == Role::Host && gMenuSelection == CHARACTER_SELECT_MENU;
++}
++
++extern "C" void lan_setup_tick(void) {
++    bool want = lan_setup_active();
++    if (want && !sState.active) {
++        Enter();
++    } else if (!want && sState.active) {
++        Leave();
++    }
++    if (!sState.active) {
++        return;
++    }
++    if (sDiscovery.Active()) {
++        sDiscovery.Poll();
++        if (sState.listIndex >= (int) sDiscovery.Games().size()) {
++            sState.listIndex = (int) sDiscovery.Games().size() - 1;
++            if (sState.listIndex < 0) {
++                sState.row = kRowButton;
++            }
++        }
++    }
++    if (S().GetRole() == Role::Host) {
++        S().SetAdvert(Advert());
++    }
++    if (sState.messageTimer > 0 && --sState.messageTimer == 0) {
++        sState.message.clear();
++    }
++    if (!S().LastError().empty() && S().GetRole() == Role::None && sState.message.empty()) {
++        Message(S().LastError());
++    }
++    if (--sState.addressTimer <= 0) {
++        sState.addressTimer = 60 * 5;
++        sState.myAddress = Netplay::LocalAddress();
++    }
++    // A client that lost the host goes back to looking for games.
++    if (sState.mode == Mode::Join && S().GetRole() == Role::None && !sDiscovery.Active()) {
++        sDiscovery.Start(Port());
++    }
++}
++
++extern "C" void lan_setup_input(const OSContPad* pads) {
++    if (!sState.active || is_screen_being_faded()) {
++        for (int p = 0; p < MAXCONTROLLERS; p++) {
++            sState.prevButtons[p] = (uint16_t) pads[p].button;
++        }
++        return;
++    }
++    // All of this PC's controllers can drive the screen.
++    uint16_t pressed = 0;
++    int dirX = 0, dirY = 0;
++    bool anyDir = false, freshDir = false;
++    for (int p = 0; p < MAXCONTROLLERS; p++) {
++        uint16_t held = (uint16_t) pads[p].button;
++        int8_t dx = (held & R_JPAD) || pads[p].stick_x > 50 ? 1 : ((held & L_JPAD) || pads[p].stick_x < -50 ? -1 : 0);
++        int8_t dy = (held & U_JPAD) || pads[p].stick_y > 50 ? 1 : ((held & D_JPAD) || pads[p].stick_y < -50 ? -1 : 0);
++        pressed |= held & ~sState.prevButtons[p];
++        if ((dx != sState.prevDirX[p] || dy != sState.prevDirY[p]) && (dx != 0 || dy != 0)) {
++            freshDir = true;
++            dirX = dx;
++            dirY = dy;
++        }
++        if (dx != 0 || dy != 0) {
++            anyDir = true;
++            if (dirX == 0 && dirY == 0 && !freshDir) {
++                dirX = dx;
++                dirY = dy;
++            }
++        }
++        sState.prevButtons[p] = held;
++        sState.prevDirX[p] = dx;
++        sState.prevDirY[p] = dy;
++    }
++    if (freshDir) {
++        sState.repeat = 20;
++    } else if (anyDir && --sState.repeat <= 0) {
++        sState.repeat = 5;
++    } else {
++        dirX = dirY = 0;
++    }
++
++    if (sState.edit != Edit::None) {
++        EditInput(pressed, dirX, dirY);
++        return;
++    }
++    if (pressed & B_BUTTON) {
++        if (ClientBusy()) {
++            S().Disconnect("Left the lobby");
++            Message("Left the host's game");
++            play_sound2(SOUND_MENU_GO_BACK);
++            return;
++        }
++        Leave();
++        func_8009E208(); // back to the main menu
++        play_sound2(SOUND_MENU_GO_BACK);
++        return;
++    }
++    if (dirY != 0) {
++        MoveRow(dirY > 0 ? -1 : 1);
++    } else if (dirX != 0 && sState.listIndex < 0) {
++        Change(dirX);
++    }
++    if (pressed & A_BUTTON) {
++        if (sState.listIndex >= 0) {
++            const auto& games = sDiscovery.Games();
++            if (sState.listIndex < (int) games.size() && !ClientBusy()) {
++                JoinGame(games[sState.listIndex].address, games[sState.listIndex].port);
++                play_sound2(SOUND_MENU_SELECT);
++            }
++        } else {
++            Activate();
++        }
++    }
++    if ((pressed & START_BUTTON) && sState.mode == Mode::Host) {
++        sState.row = kRowButton;
++        sState.listIndex = -1;
++        Activate();
++    }
++    if ((pressed & Z_TRIG) && sState.mode == Mode::Join && !ClientBusy()) {
++        StartJoinMode(); // look again
++        Message("Looking for games...");
++    }
++}
++
++extern "C" void lan_setup_render(void) {
++    if (!lan_setup_active() || !sState.active) {
++        return;
++    }
++    const bool host = sState.mode == Mode::Host;
++    const bool busy = ClientBusy();
++
++    // Backdrop over the character screen.
++    Box(0, 0, 320, 240, 18, 40, 120, 255);
++    Box(0, 120, 320, 240, 12, 26, 84, 255);
++
++    // Banner.
++    Box(70, 6, 250, 28, 255, 216, 0, 255);
++    Box(72, 8, 248, 26, 208, 32, 32, 255);
++    TextCentered(160, 23, "LAN GAME  " + Advert(), TEXT_YELLOW, 0.7f);
++
++    const int x0 = 22, x1 = 298, valueX = 168, rowH = 16;
++    int y = 34;
++    auto rowBack = [&](int row) {
++        bool sel = sState.listIndex < 0 && sState.row == row && sState.edit == Edit::None;
++        if (sel) {
++            Box(x0, y, x1, y + rowH - 1, 255, 246, 220, 255);
++        } else {
++            Box(x0, y, x1, y + rowH - 1, 16, 16, 16, 230);
++        }
++        return sel;
++    };
++    auto label = [&](const std::string& s, bool sel) { Text(x0 + 6, y + 12, s, sel ? TEXT_RED : TEXT_YELLOW, 0.6f); };
++
++    // GAME: HOST / JOIN
++    {
++        bool sel = rowBack(kRowGame);
++        label("GAME", sel);
++        Arrow(valueX, y + 7, -1, 230, 60, 50);
++        Text(valueX + 10, y + 12, host ? "HOST" : "JOIN", TEXT_RED, 0.6f);
++        Arrow(valueX + 58, y + 7, 1, 230, 60, 50);
++        y += rowH + 1;
++    }
++    // ADDRESS
++    {
++        bool sel = rowBack(kRowAddress);
++        label(host ? "YOUR ADDRESS" : "HOST ADDRESS", sel);
++        if (host) {
++            Text(valueX, y + 12, sState.myAddress.empty() ? "UNKNOWN" : sState.myAddress, TEXT_GREEN, 0.6f);
++        } else if (sState.edit == Edit::Address) {
++            // 192.168.001.023 with the cursor digit highlighted.
++            int cx = valueX;
++            for (int i = 0; i < 12; i++) {
++                std::string d(1, (char) ('0' + sState.addrDigits[i]));
++                if (i == sState.editCursor) {
++                    Box(cx - 1, y + 2, cx + 7, y + 14, 255, 225, 74, 255);
++                }
++                Text(cx, y + 12, d, i == sState.editCursor ? TEXT_RED : TEXT_GREEN, 0.6f);
++                cx += 8;
++                if (i % 3 == 2 && i < 11) {
++                    Text(cx, y + 12, ".", TEXT_GREEN, 0.6f);
++                    cx += 5;
++                }
++            }
++        } else {
++            Text(valueX, y + 12, HostAddress(), TEXT_GREEN, 0.6f);
++        }
++        y += rowH + 1;
++    }
++    // NAME
++    {
++        bool sel = rowBack(kRowName);
++        label("YOUR NAME", sel);
++        if (sState.edit == Edit::Name) {
++            int cx = valueX;
++            for (int i = 0; i < kNameMax; i++) {
++                char c = i < (int) sState.editText.size() ? sState.editText[i] : ' ';
++                if (i == sState.editCursor) {
++                    Box(cx - 1, y + 2, cx + 8, y + 14, 255, 225, 74, 255);
++                } else {
++                    Box(cx, y + 13, cx + 7, y + 14, 127, 216, 255, 255);
++                }
++                if (c != ' ') {
++                    Text(cx, y + 12, std::string(1, c), i == sState.editCursor ? TEXT_RED : TEXT_BLUE, 0.6f);
++                }
++                cx += 10;
++            }
++        } else {
++            Text(valueX, y + 12, Name(), TEXT_BLUE, 0.6f);
++        }
++        y += rowH + 1;
++    }
++    // PLAYERS ON THIS PC
++    {
++        bool sel = rowBack(kRowPlayers);
++        label("PLAYERS ON THIS PC", sel);
++        Arrow(valueX, y + 7, -1, 127, 216, 255);
++        Text(valueX + 12, y + 12, std::to_string(LocalPlayers()), TEXT_BLUE, 0.6f);
++        Arrow(valueX + 26, y + 7, 1, 127, 216, 255);
++        y += rowH + 1;
++    }
++    // INPUT DELAY (host)
++    {
++        bool sel = rowBack(kRowDelay);
++        label("INPUT DELAY", sel);
++        if (host) {
++            Arrow(valueX, y + 7, -1, 127, 216, 255);
++            Text(valueX + 12, y + 12, DelayText(), TEXT_BLUE, 0.6f);
++            Arrow(valueX + 50, y + 7, 1, 127, 216, 255);
++        } else {
++            Text(valueX, y + 12, "SET BY THE HOST", TEXT_BLUE, 0.5f);
++        }
++        y += rowH + 1;
++    }
++    // PORT
++    {
++        bool sel = rowBack(kRowPort);
++        label("PORT", sel);
++        if (sState.edit == Edit::Port) {
++            int cx = valueX;
++            for (int i = 0; i < 5; i++) {
++                if (i == sState.editCursor) {
++                    Box(cx - 1, y + 2, cx + 7, y + 14, 255, 225, 74, 255);
++                }
++                Text(cx, y + 12, std::string(1, (char) ('0' + sState.portDigits[i])),
++                     i == sState.editCursor ? TEXT_RED : TEXT_GREEN, 0.6f);
++                cx += 8;
++            }
++        } else {
++            Text(valueX, y + 12, std::to_string(Port()), TEXT_GREEN, 0.6f);
++        }
++        y += rowH + 4;
++    }
++    // Button
++    {
++        bool sel = sState.listIndex < 0 && sState.row == kRowButton && sState.edit == Edit::None;
++        Box(100, y, 220, y + 16, sel ? 255 : 80, sel ? 246 : 80, sel ? 220 : 80, 255);
++        Box(102, y + 2, 218, y + 14, 16, 16, 16, 255);
++        std::string text;
++        if (host) {
++            text = S().GetRole() == Role::Host ? "START RACE" : "OPEN GAME";
++        } else {
++            text = busy ? (S().GetPhase() == Phase::Lobby ? "CONNECTED" : "CONNECTING...") : "CONNECT";
++        }
++        TextCentered(160, y + 13, text, sel ? TEXT_BLUE_GREEN_RED_CYCLE_1 : TEXT_GREEN, 0.6f);
++        y += 20;
++    }
++
++    // Panel: who's in (host / connected client) or games found (joining).
++    const int py = y;
++    Box(x0, py, x1, 222, 255, 216, 0, 255);
++    Box(x0 + 2, py + 2, x1 - 2, 220, 0, 0, 0, 200);
++    if (host || busy) {
++        const auto& players = S().Players();
++        int total = S().PlayerCount();
++        std::string head = "PLAYERS " + std::to_string(total) + " OF 8";
++        if (host && total < 2) {
++            head += "  - WAITING FOR MORE";
++        } else if (busy && S().GetPhase() == Phase::Lobby) {
++            head += "  - WAITING FOR THE HOST";
++        }
++        Text(x0 + 8, py + 13, head, TEXT_YELLOW, 0.5f);
++        int line = 0;
++        for (int i = 0; i < Netplay::kMaxPlayers; i++) {
++            if (!players[i].connected) {
++                continue;
++            }
++            std::string entry = std::to_string(line + 1) + " " + players[i].name;
++            if (players[i].localCount > 1) {
++                entry += " X" + std::to_string(players[i].localCount);
++            }
++            if (i == 0) {
++                entry += " HOST";
++            }
++            int col = line % 2, r = line / 2;
++            Text(x0 + 8 + col * 136, py + 26 + r * 11, entry, i == S().LocalSlot() ? TEXT_GREEN : TEXT_BLUE, 0.5f);
++            line++;
++        }
++    } else {
++        Text(x0 + 8, py + 13, "GAMES FOUND ON THIS NETWORK", TEXT_YELLOW, 0.5f);
++        const auto& games = sDiscovery.Games();
++        if (games.empty()) {
++            Text(x0 + 8, py + 27, "LOOKING... OR TYPE THE HOST ADDRESS ABOVE", TEXT_BLUE, 0.45f);
++        }
++        for (int i = 0; i < (int) games.size() && i < 4; i++) {
++            const auto& g = games[i];
++            int gy = py + 18 + i * 12;
++            bool sel = sState.listIndex == i;
++            if (sel) {
++                Box(x0 + 4, gy, x1 - 4, gy + 11, 255, 225, 74, 120);
++            }
++            std::string entry = g.name + "  " + g.advert + "  " + std::to_string(g.players) + " OF 8  " + g.address;
++            Text(x0 + 8, gy + 9, entry, sel ? TEXT_RED : TEXT_GREEN, 0.45f);
++        }
++    }
++
++    // Message / controls.
++    if (!sState.message.empty()) {
++        TextCentered(160, 218, sState.message, TEXT_RED, 0.45f);
++    }
++    std::string hint;
++    if (sState.edit == Edit::Name) {
++        hint = "UP DOWN LETTER   LEFT RIGHT MOVE   B DELETE   START DONE";
++    } else if (sState.edit != Edit::None) {
++        hint = "UP DOWN DIGIT   LEFT RIGHT MOVE   A DONE   B CANCEL";
++    } else if (host) {
++        hint = "UP DOWN CHOOSE   LEFT RIGHT CHANGE   A OK   B BACK   START RACE";
++    } else {
++        hint = "UP DOWN CHOOSE   A OK   B BACK   Z LOOK AGAIN";
++    }
++    TextCentered(160, 234, hint, TEXT_YELLOW, 0.42f);
++}
+diff --git a/src/port/couch/couch.h b/src/port/couch/couch.h
+index aa845b4..38c8455 100644
+--- a/src/port/couch/couch.h
++++ b/src/port/couch/couch.h
+@@ -20,9 +20,14 @@ extern "C" {
+ #define COUCH_MAX_PLAYERS 8
+ // The main menu column the couch party uses (gPlayerCount while on the menus).
+ #define COUCH_MENU_PLAYER_COUNT 3
++// LAN GAME's column (gPlayerCount on the menus).
++#define COUCH_LAN_PLAYER_COUNT 4
+ 
+-// 1 while the menus are on the Couch Party column (and through its races).
++// 1 while the menus are on the Couch Party column (and through its races, and
++// through a LAN GAME match).
+ extern s32 gCouchParty;
++// 1 while the menus are on the LAN GAME column (until its match starts).
++extern s32 gLanMenu;
+ 
+ // Couch Party replaces 3P/4P (off during LAN netplay, or if turned off in the
+ // settings).
+@@ -36,6 +41,17 @@ s32 couch_count_or(s32 stock);
+ // True when the couch party owns the big-race settings (localplay must not touch them).
+ bool couch_owns_big_race(void);
+ 
++// LAN GAME: a couch-style match over several PCs.
++bool couch_lan_mode(void);
++s32 couch_menu_column(void); // gPlayerCount for the couch/LAN column
++void couch_lan_begin(s32 totalPlayers); // session start, every PC
++void couch_lan_end(void);               // session over
++bool couch_lan_hosting(void);           // this PC is hosting from the LAN setup screen
++// This PC's players, when only some of them are local (LAN GAME).
++bool couch_local_players(s32* first, s32* count);
++// B on the character screen may go back to the main menu.
++bool couch_allow_back(void);
++
+ // Hooks.
+ void couch_menu_tick(void);                // every frame (Game.cpp)
+ void couch_filter_pads(OSContPad* pads);   // read_controllers: joining, results input, controller order
+diff --git a/src/port/couch/lan_setup.h b/src/port/couch/lan_setup.h
+new file mode 100644
+index 0000000..5be613b
+--- /dev/null
++++ b/src/port/couch/lan_setup.h
+@@ -0,0 +1,25 @@
++#ifndef SPAGHETTI_LAN_SETUP_H
++#define SPAGHETTI_LAN_SETUP_H
++
++// LAN GAME setup screen: shown on top of the character screen after VS or
++// Battle is picked in the main menu's LAN GAME column, until the match
++// starts. Host or join a game, set your name, players on this PC, input
++// delay and port, all with a controller; drawn with the game's own font.
++
++#include <libultraship.h>
++#include <stdbool.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++bool lan_setup_active(void);
++void lan_setup_tick(void);              // every frame (from couch_menu_tick)
++void lan_setup_input(const OSContPad* pads); // read_controllers, local pads
++void lan_setup_render(void);            // from its menu item
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+diff --git a/src/port/leaderboard/LeaderboardGame.cpp b/src/port/leaderboard/LeaderboardGame.cpp
+index 02bd3db..7b1a7cc 100644
+--- a/src/port/leaderboard/LeaderboardGame.cpp
++++ b/src/port/leaderboard/LeaderboardGame.cpp
+@@ -1,6 +1,8 @@
+ #include "LeaderboardGame.h"
+ #include "leaderboard_game.h"
+ 
++#include <algorithm>
++#include <cstdio>
+ #include <cstring>
+ #include <ctime>
+ #include <memory>
+@@ -10,17 +12,18 @@
+ #include "port/Game.h"
+ #include "engine/World.h"
+ #include "port/netplay/Netplay.h"
++#include "port/ui/GameDraw.h"
+ 
+ extern "C" {
+ #include "main.h"
+ #include "code_80057C60.h"
+ #include "code_800029B0.h"
++#include "menus.h"
++#include "audio/external.h"
++#include <sounds.h>
+ #include <defines.h>
+ }
+ 
+-namespace GameUI {
+-void ShowLeaderboardEntryWindow(bool show);
+-}
+ 
+ namespace Leaderboard {
+ 
+@@ -94,13 +97,36 @@ void StartEntry(const std::string& track, const Entry& entry, size_t rank) {
+     sPending.name[kMaxNameLength] = '\0';
+     sPending.cursor = 0;
+     sPad = PadState{};
+-    GameUI::ShowLeaderboardEntryWindow(true);
++    sPad.buttons = 0xFFFF; // buttons held as the race ends don't count
+ }
+ 
+ void CloseEntry() {
+     sPending.active = false;
+     sWaitRelease = true;
+-    GameUI::ShowLeaderboardEntryWindow(false);
++}
++
++// Short driver names for the game font.
++const char* const kShortNames[8] = { "MARIO", "LUIGI", "YOSHI", "TOAD", "D.K.", "WARIO", "PEACH", "BOWSER" };
++
++// DATA screen: the top 10 page (on by default; Z flips to the game's own records).
++bool sDataBoardPage = true;
++bool sOnCourseData = false;
++uint16_t sDataPrev = 0;
++
++// The DATA screens list the 16 stock tracks cup by cup.
++const char* const kDataTracks[16] = {
++    "mk:luigi_raceway", "mk:moo_moo_farm", "mk:koopa_troopa_beach", "mk:kalimari_desert",
++    "mk:toads_turnpike", "mk:frappe_snowland", "mk:choco_mountain", "mk:mario_raceway",
++    "mk:wario_stadium", "mk:sherbet_land", "mk:royal_raceway", "mk:bowsers_castle",
++    "mk:dk_jungle", "mk:yoshi_valley", "mk:banshee_boardwalk", "mk:rainbow_road",
++};
++
++std::string Ordinal(size_t n) {
++    const char* suffix = "TH";
++    if (n % 100 < 11 || n % 100 > 13) {
++        suffix = n % 10 == 1 ? "ST" : n % 10 == 2 ? "ND" : n % 10 == 3 ? "RD" : "TH";
++    }
++    return std::to_string(n) + suffix;
+ }
+ 
+ } // namespace
+@@ -204,7 +230,38 @@ extern "C" void leaderboard_tick(void) {
+     }
+ }
+ 
++// DATA screen (a track's records): Z flips between the top 10 and the game's
++// own records page. While the top 10 is up, only B (back) reaches the game.
++static void DataScreenPads(OSContPad* pads) {
++    bool onCourseData = gGamestate < RACING && gMenuSelection == COURSE_DATA_MENU;
++    if (onCourseData && !sOnCourseData) {
++        sDataBoardPage = !CVarGetInteger("gLeaderboard.DataPageOff", 0);
++        sDataPrev = 0xFFFF;
++    }
++    sOnCourseData = onCourseData;
++    if (!onCourseData) {
++        return;
++    }
++    uint16_t held = 0;
++    for (int i = 0; i < 4; i++) {
++        held |= (uint16_t) pads[i].button;
++    }
++    uint16_t pressed = held & ~sDataPrev;
++    sDataPrev = held;
++    if (pressed & Z_TRIG) {
++        sDataBoardPage = !sDataBoardPage;
++        play_sound2(SOUND_MENU_OPTION);
++    }
++    if (sDataBoardPage) {
++        for (int i = 0; i < MAXCONTROLLERS; i++) {
++            pads[i].button &= B_BUTTON;
++            pads[i].stick_x = pads[i].stick_y = 0;
++        }
++    }
++}
++
+ extern "C" void leaderboard_filter_pads(OSContPad* pads) {
++    DataScreenPads(pads);
+     if (!sPending.active && !sWaitRelease) {
+         return;
+     }
+@@ -242,19 +299,25 @@ extern "C" void leaderboard_filter_pads(OSContPad* pads) {
+ 
+     PendingRecord& p = sPending;
+     const int maxPos = (int) kMaxNameLength - 1;
+-    bool edited = false;
+ 
++    // START+B: skip without saving.
++    if (((pressed & B_BUTTON) && (held & START_BUTTON)) || ((pressed & START_BUTTON) && (held & B_BUTTON))) {
++        SkipPending();
++        play_sound2(SOUND_MENU_GO_BACK);
++        return;
++    }
+     if (newDir && dirY != 0) {
+         int len = (int) std::strlen(p.name);
+         char cur = p.cursor < len ? p.name[p.cursor] : ' ';
+         int n = (int) sizeof(kPadCharset) - 1;
+         int idx = (CharsetIndex(cur) + (dirY > 0 ? 1 : n - 1)) % n;
+         SetNameChar(p.cursor, kPadCharset[idx]);
+-        edited = true;
++        play_sound2(SOUND_MENU_CURSOR_MOVE);
+     }
+     if ((newDir && dirX > 0) || (pressed & A_BUTTON)) {
+         if ((pressed & A_BUTTON) && p.cursor >= maxPos) {
+             SubmitPending();
++            play_sound2(SOUND_MENU_OK_CLICKED);
+             return;
+         }
+         if (p.cursor < maxPos) {
+@@ -263,21 +326,144 @@ extern "C" void leaderboard_filter_pads(OSContPad* pads) {
+             }
+             p.cursor++;
+         }
+-        edited = true;
+     }
+-    if ((newDir && dirX < 0) || (pressed & B_BUTTON)) {
++    if (newDir && dirX < 0 && p.cursor > 0) {
++        p.cursor--;
++    }
++    if (pressed & B_BUTTON) {
++        // Delete the letter under the cursor, then step back.
++        size_t len = std::strlen(p.name);
++        if ((size_t) p.cursor < len) {
++            std::memmove(p.name + p.cursor, p.name + p.cursor + 1, len - p.cursor);
++        }
+         if (p.cursor > 0) {
+             p.cursor--;
+         }
+-        edited = true;
++        play_sound2(SOUND_MENU_GO_BACK);
++    }
++    if (pressed & Z_TRIG) {
++        // Use the driver's name.
++        std::snprintf(p.name, sizeof(p.name), "%s", kShortNames[p.entry.character & 7]);
++        p.cursor = std::min<int>((int) std::strlen(p.name), maxPos);
++        play_sound2(SOUND_MENU_SELECT);
+     }
+     if (pressed & START_BUTTON) {
+         SubmitPending();
++        play_sound2(SOUND_MENU_OK_CLICKED);
++    }
++}
++
++using namespace GameDraw;
++
++// Time Trial record: name entry, drawn over the race.
++extern "C" void leaderboard_render_race(void) {
++    if (!sPending.active || gGamestate != RACING) {
+         return;
+     }
+-    if (pressed & Z_TRIG) {
+-        SkipPending();
++    const PendingRecord& p = sPending;
++    Panel(28, 18, 292, 224, 225);
++    TextCentered(160, 38, "NEW RECORD! " + Ordinal(p.rank), TEXT_BLUE_GREEN_RED_CYCLE_1, 0.8f);
++    std::string track = Printable(p.trackName);
++    Text(52, 55, track, TEXT_YELLOW, 0.55f);
++    TextRight(268, 55, FormatTime(p.entry.timeCs), TEXT_GREEN, 0.6f);
++    TextCentered(160, 72, "ENTER YOUR NAME", TEXT_BLUE, 0.55f);
++
++    // Letter slots.
++    const int slotW = 16, x0 = 160 - (int) kMaxNameLength * slotW / 2, baseY = 94;
++    size_t len = std::strlen(p.name);
++    for (int i = 0; i < (int) kMaxNameLength; i++) {
++        int x = x0 + i * slotW;
++        bool cur = i == p.cursor;
++        if (cur) {
++            int t = gGlobalTimer % 20;
++            Box(x, baseY - 15, x + slotW - 2, baseY + 2, 255, 225, 74, t < 10 ? 170 : 110);
++        }
++        Box(x, baseY + 3, x + slotW - 2, baseY + 5, cur ? 255 : 127, cur ? 225 : 216, cur ? 74 : 255, 255);
++        if ((size_t) i < len && p.name[i] != ' ') {
++            TextCentered(x + (slotW - 2) / 2, baseY, std::string(1, p.name[i]), cur ? TEXT_YELLOW : TEXT_GREEN, 0.75f);
++        }
++    }
++    Text(110, 116, "DRIVER", TEXT_YELLOW, 0.5f);
++    Text(160, 116, kShortNames[p.entry.character & 7], TEXT_RED, 0.5f);
++
++    // The board around the new time, with it in place.
++    std::vector<Entry> rows;
++    if (const Board* b = GetStore().Get(p.track)) {
++        rows = b->entries;
++    }
++    size_t at = std::min(p.rank - 1, rows.size());
++    Entry mine = p.entry;
++    mine.name = len ? std::string(p.name) : std::string("-");
++    rows.insert(rows.begin() + at, mine);
++    if (rows.size() > kMaxEntries) {
++        rows.resize(kMaxEntries);
++    }
++    size_t first = at >= 2 ? at - 2 : 0;
++    if (first + 5 > rows.size()) {
++        first = rows.size() > 5 ? rows.size() - 5 : 0;
++    }
++    int y = 134;
++    for (size_t i = first; i < rows.size() && i < first + 5; i++, y += 12) {
++        bool me = i == at;
++        if (me) {
++            Box(44, y - 10, 276, y + 2, 255, 225, 74, 90);
++        }
++        Text(48, y, std::to_string(i + 1), i == 0 ? TEXT_YELLOW : TEXT_GREEN, 0.5f);
++        Text(66, y, rows[i].name, me ? TEXT_YELLOW : TEXT_GREEN, 0.5f);
++        Text(168, y, kShortNames[rows[i].character & 7], TEXT_BLUE, 0.5f);
++        TextRight(272, y, FormatTime(rows[i].timeCs), me ? TEXT_YELLOW : TEXT_GREEN, 0.5f);
++    }
++    TextCentered(160, 204, "UP DOWN LETTER  LEFT RIGHT MOVE  A NEXT  B DELETE", TEXT_YELLOW, 0.42f);
++    TextCentered(160, 216, std::string("Z USE ") + kShortNames[p.entry.character & 7] + "  START SAVE  START+B SKIP",
++                 TEXT_YELLOW, 0.42f);
++}
++
++// DATA screen (a track's records): the top 10 page.
++extern "C" void leaderboard_render_menus(void) {
++    if (gGamestate >= RACING || gMenuSelection != COURSE_DATA_MENU) {
++        return;
++    }
++    if (!sDataBoardPage) {
++        TextRight(314, 14, "Z TOP 10", TEXT_YELLOW, 0.45f);
+         return;
+     }
+-    p.padEdited = p.padEdited || edited;
++    int index = std::clamp<int>(gTimeTrialDataCourseIndex, 0, 15);
++    const std::string track = kDataTracks[index];
++    Box(0, 0, 320, 240, 18, 40, 120, 255);
++    Box(0, 120, 320, 240, 12, 26, 84, 255);
++    TextCentered(160, 26, TrackDisplayName(track), TEXT_BLUE_GREEN_RED_CYCLE_1, 0.75f);
++    TextCentered(160, 42, "TIME TRIAL  TOP 10", TEXT_YELLOW, 0.55f);
++    Panel(26, 50, 294, 214, 200);
++    Text(36, 66, "NO", TEXT_BLUE, 0.45f);
++    Text(60, 66, "NAME", TEXT_BLUE, 0.45f);
++    Text(166, 66, "DRIVER", TEXT_BLUE, 0.45f);
++    TextRight(284, 66, "TIME", TEXT_BLUE, 0.45f);
++    const Board* board = GetStore().Get(track);
++    if (board == nullptr || board->entries.empty()) {
++        TextCentered(160, 120, "NO TIMES YET", TEXT_GREEN, 0.6f);
++        TextCentered(160, 138, "FINISH A TIME TRIAL HERE TO SET ONE", TEXT_YELLOW, 0.42f);
++    } else {
++        int y = 80;
++        uint32_t bestLap = 0;
++        std::string bestLapBy;
++        for (size_t i = 0; i < board->entries.size() && i < kMaxEntries; i++, y += 12) {
++            const Entry& e = board->entries[i];
++            int color = i == 0 ? TEXT_YELLOW : TEXT_GREEN;
++            Text(38, y, std::to_string(i + 1), color, 0.5f);
++            Text(60, y, e.name, color, 0.5f);
++            Text(166, y, kShortNames[e.character & 7], TEXT_BLUE, 0.5f);
++            TextRight(284, y, FormatTime(e.timeCs), color, 0.5f);
++            for (uint32_t lap : e.lapsCs) {
++                if (lap > 0 && (bestLap == 0 || lap < bestLap)) {
++                    bestLap = lap;
++                    bestLapBy = e.name;
++                }
++            }
++        }
++        if (bestLap > 0) {
++            Text(36, 206, "BEST LAP", TEXT_YELLOW, 0.45f);
++            Text(100, 206, FormatTime(bestLap) + "  " + bestLapBy, TEXT_GREEN, 0.45f);
++        }
++    }
++    TextCentered(160, 230, "Z GAME RECORDS   B BACK", TEXT_YELLOW, 0.45f);
+ }
+diff --git a/src/port/leaderboard/leaderboard_game.h b/src/port/leaderboard/leaderboard_game.h
+index b638d49..8d004b5 100644
+--- a/src/port/leaderboard/leaderboard_game.h
++++ b/src/port/leaderboard/leaderboard_game.h
+@@ -17,6 +17,10 @@ void leaderboard_tick(void);
+ // After the controllers are read: while the name entry is open, player 1's
+ // controller types the name instead of driving the game.
+ void leaderboard_filter_pads(OSContPad* pads);
++// Drawing with the game's font: name entry over the race, and the top 10 page
++// on the DATA screen.
++void leaderboard_render_race(void);
++void leaderboard_render_menus(void);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/src/port/localplay/localplay_render.c b/src/port/localplay/localplay_render.c
+index cb739e0..a279f65 100644
+--- a/src/port/localplay/localplay_render.c
++++ b/src/port/localplay/localplay_render.c
+@@ -14,6 +14,7 @@
+ #include "racing/skybox_and_splitscreen.h"
+ #include "port/netplay/netrace.h"
+ #include "port/couch/couch.h"
++#include "port/netplay/Netplay.h"
+ #include "localplay.h"
+ #include "localplay_internal.h"
+ 
+@@ -38,6 +39,9 @@ void localplay_feed_extra_pads(const OSContPad* pads) {
+     if (!gNetLocalViews && !gCouchParty) {
+         return;
+     }
++    if (Netplay_IsInGame()) {
++        return; // netplay fills players 5-8 itself, for every PC
++    }
+     for (i = 4; i < NETRACE_MAX_HUMANS; i++) {
+         netrace_set_extra_pad(i - 4, (u16) pads[i].button, pads[i].stick_x, pads[i].stick_y);
+     }
+@@ -125,19 +129,33 @@ static void compose_view(s32 fb, LPRect rect, u32 texW, u32 texH) {
+ void localplay_render_views(void) {
+     LPRect rects[NETRACE_MAX_HUMANS];
+     s32 count = gNetHumanCount;
++    s32 first = 0;
+     s32 v;
+     float renderW = (float) OTRGetGameRenderWidth();
+     float renderH = (float) OTRGetGameRenderHeight();
+     float scale = localplay_render_scale();
+     s32 drawn[NETRACE_MAX_HUMANS] = { 0 };
+ 
++    // LAN GAME: only this PC's players get a view here.
++    if (couch_local_players(&first, &count)) {
++        if (first < 0 || first >= NETRACE_MAX_HUMANS) {
++            first = 0;
++        }
++        if (first + count > gNetHumanCount) {
++            count = gNetHumanCount - first;
++        }
++    }
++    if (count < 1) {
++        count = 1;
++    }
+     if (count > NETRACE_MAX_HUMANS) {
+         count = NETRACE_MAX_HUMANS;
+     }
+     count = localplay_get_layout(count, rects);
+ 
+     for (v = 0; v < count; v++) {
+-        ScreenContext* screen = &gScreenContexts[v];
++        s32 p = first + v; // the player this view follows
++        ScreenContext* screen = &gScreenContexts[p];
+         float pixelW = rects[v].w * renderW;
+         float pixelH = rects[v].h * renderH;
+         u32 fbW = (u32) (pixelW * scale);
+@@ -152,17 +170,17 @@ void localplay_render_views(void) {
+         fb = ensure_view_fb(v, fbW, fbH);
+ 
+         // Each view is a normal full-screen 1P render into its own buffer.
+-        screen->player = &gPlayers[v];
++        screen->player = &gPlayers[p];
+         screen->screenWidth = SCREEN_WIDTH;
+         screen->screenHeight = SCREEN_HEIGHT;
+         screen->screenStartX = SCREEN_WIDTH / 2;
+         screen->screenStartY = SCREEN_HEIGHT / 2;
+ 
+         gLocalViewAspectOverride = pixelW / pixelH;
+-        gNetViewPlayer = v; // the HUD shows this player's item, laps, place
++        gNetViewPlayer = p; // the HUD shows this player's item, laps, place
+ 
+         gsSPSetFB(gDisplayListHead++, fb);
+-        render_screens(screen, RENDER_SCREEN_MODE_1P_PLAYER_ONE, 0, v);
++        render_screens(screen, RENDER_SCREEN_MODE_1P_PLAYER_ONE, 0, p);
+         func_800591B4(); // minimap and other overlays, per view
+         gsSPResetFB(gDisplayListHead++);
+         drawn[v] = 1;
+diff --git a/src/port/netplay/Netplay.cpp b/src/port/netplay/Netplay.cpp
+index 9ab50b5..383c3d9 100644
+--- a/src/port/netplay/Netplay.cpp
++++ b/src/port/netplay/Netplay.cpp
+@@ -16,6 +16,7 @@ extern "C" {
+ #include <common_structs.h>
+ #include <defines.h>
+ #include "port/netplay/netrace.h"
++#include "port/couch/couch.h"
+ }
+ 
+ namespace {
+@@ -88,6 +89,7 @@ void RestoreOverrides() {
+     }
+     CVarSetInteger("gFreecam", sSavedFreecam);
+     sOverridesActive = false;
++    couch_lan_end(); // a LAN GAME's couch-style state
+     gNetBigRace = 0;
+     gNetHumanCount = 0;
+     gNetViewPlayer = 0;
+@@ -233,9 +235,9 @@ std::string DescribeMismatch(const std::vector<uint8_t>& hostBlob, const std::ve
+ 
+ // ---- start state: everything the menus read that could differ per machine ----
+ #define MENU_BYTES(X)                                                                                      \
+-    X(gCharacterSelections, sizeof(s8) * 4)                                                                \
+-    X(gCharacterGridSelections, sizeof(s8) * 4)                                                            \
+-    X(gCharacterGridIsSelected, sizeof(bool) * 4)                                                          \
++    X(gCharacterSelections, sizeof(s8) * 8)                                                                \
++    X(gCharacterGridSelections, sizeof(s8) * 8)                                                            \
++    X(gCharacterGridIsSelected, sizeof(bool) * 8)                                                          \
+     X(gGameModeMenuColumn, sizeof(s8) * NUM_ROWS_GAME_MODE_MENU)                                           \
+     X(gGameModeSubMenuColumn, sizeof(s8) * NUM_COLUMN_GAME_MODE_SUB_MENU * NUM_ROWS_GAME_MODE_SUB_MENU)    \
+     X(&gMainMenuSelection, sizeof(gMainMenuSelection))                                                     \
+@@ -281,6 +283,12 @@ std::vector<uint8_t> CaptureStartState() {
+     for (int i = 0; i < kMaxPlayers; i++) {
+         gNetCharacters[i] = (s8) (s.Players()[i].profile & 7);
+     }
++    // LAN GAME (VS / Battle from the main menu): everyone goes to character select.
++    bool lan = couch_lan_hosting();
++    Put8(b, lan ? 1 : 0);
++    if (lan) {
++        couch_lan_begin(s.PlayerCount());
++    }
+ 
+     Put8(b, (uint8_t) kNumSyncedCVars);
+     for (auto& cv : kSyncedCVars) {
+@@ -324,6 +332,10 @@ bool ApplyStartState(const std::vector<uint8_t>& b, std::string& err) {
+     for (int i = 0; i < kMaxPlayers; i++) {
+         gNetCharacters[i] = (s8) (r.Get8() & 7);
+     }
++    bool lan = r.Get8() != 0;
++    if (lan) {
++        couch_lan_begin(gNetHumanCount);
++    }
+     int n = r.Get8();
+     for (int i = 0; i < n && r.ok; i++) {
+         std::string name = r.GetStr();
+@@ -360,7 +372,7 @@ uint32_t StateHash() {
+     h = Fnv(h, &gModeSelection, sizeof(gModeSelection));
+     h = Fnv(h, &gCCSelection, sizeof(gCCSelection));
+     h = Fnv(h, &gPlayerCountSelection1, sizeof(gPlayerCountSelection1));
+-    h = Fnv(h, gCharacterSelections, sizeof(s8) * 4);
++    h = Fnv(h, gCharacterSelections, sizeof(s8) * 8);
+     h = Fnv(h, &gNetHumanCount, sizeof(gNetHumanCount));
+     if (gGamestate == RACING) {
+         h = Fnv(h, &gGamestate, sizeof(gGamestate));
+@@ -427,7 +439,7 @@ extern "C" bool Netplay_Update(void) {
+     EnsureHooks();
+     bool started = Get().Update();
+     if (started) {
+-        gNetViewPlayer = Get().LocalSlot(); // render-only: this PC's own kart
++        gNetViewPlayer = Get().LocalFirst(); // render-only: this PC's own kart
+     }
+     if (!Get().IsInGame() && Get().GetPhase() == Phase::Idle) {
+         RestoreOverrides(); // covers a client that applied START but dropped before frame 0
+@@ -441,12 +453,17 @@ extern "C" void Netplay_ExchangeInputs(OSContPad* pads) {
+         return;
+     }
+     FramePads all;
+-    if (!s.ExchangeInputs(FromOS(pads[0]), all)) {
++    // This PC's players use its controller ports 1..n.
++    Pad local[kMaxPlayers];
++    for (int i = 0; i < s.LocalCount() && i < kMaxPlayers; i++) {
++        local[i] = FromOS(pads[i]);
++    }
++    if (!s.ExchangeInputs(local, all)) {
+         return; // session ended; this machine carries on locally
+     }
+     // Players 1-4 go through the stock controller path; 5-8 (big race) have
+-    // their own storage.
+-    for (int i = 0; i < 4; i++) {
++    // their own storage. All 8 are left in `pads` too.
++    for (int i = 0; i < kMaxPlayers && i < MAXCONTROLLERS; i++) {
+         ToOS(all[i], pads[i]);
+     }
+     for (int i = 4; i < kMaxPlayers; i++) {
+@@ -458,6 +475,20 @@ extern "C" bool Netplay_IsInGame(void) {
+     return Get().IsInGame();
+ }
+ 
++extern "C" s32 Netplay_LocalFirst(void) {
++    return Get().IsInGame() ? Get().LocalFirst() : 0;
++}
++
++extern "C" s32 Netplay_LocalCount(void) {
++    return Get().IsInGame() ? Get().LocalCount() : 0;
++}
++
++extern "C" void Netplay_EndSession(const char* reason) {
++    if (Get().GetRole() != Role::None) {
++        Get().Disconnect(reason ? reason : "");
++    }
++}
++
+ extern "C" void Netplay_OnLocalReset(void) {
+     if (Get().GetRole() != Role::None) {
+         Get().Disconnect("Session ended: a player reset the game");
+diff --git a/src/port/netplay/Netplay.h b/src/port/netplay/Netplay.h
+index d10865e..3b66d4c 100644
+--- a/src/port/netplay/Netplay.h
++++ b/src/port/netplay/Netplay.h
+@@ -25,6 +25,11 @@ bool Netplay_IsInGame(void);
+ // The local user pressed Reset in the menu. Ends any session (a one-sided
+ // reset would desync everyone).
+ void Netplay_OnLocalReset(void);
++// In game: this PC's players are global players first..first+count-1.
++s32 Netplay_LocalFirst(void);
++s32 Netplay_LocalCount(void);
++// Leave the session (anyone).
++void Netplay_EndSession(const char* reason);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/src/port/netplay/NetplayCore.cpp b/src/port/netplay/NetplayCore.cpp
+index 5cdf3dc..4cc3d74 100644
+--- a/src/port/netplay/NetplayCore.cpp
++++ b/src/port/netplay/NetplayCore.cpp
+@@ -49,7 +49,7 @@ namespace Netplay {
+ namespace {
+ 
+ constexpr uint32_t kMagic = 0x4D4B3634; // "MK64"
+-constexpr uint16_t kProtocolVersion = 1;
++constexpr uint16_t kProtocolVersion = 2; // 2: several players per PC
+ constexpr uint32_t kMaxMessage = 1u << 20;
+ 
+ enum MsgType : uint8_t {
+@@ -64,8 +64,14 @@ enum MsgType : uint8_t {
+     MSG_DESYNC,     // H->C  frame
+     MSG_BYE,        // any   reason
+     MSG_PROFILE,    // C->H  profile byte
++    MSG_LOCALCOUNT, // C->H  players on this PC
+ };
+ 
++// LAN discovery (UDP): probe "MK64?" + version, reply "MK64!" + version + info.
++constexpr uint32_t kProbeMagic = 0x3F34364D; // "M64?"
++constexpr uint32_t kReplyMagic = 0x2134364D; // "M64!"
++
++
+ #ifdef _WIN32
+ bool sWinsockReady = false;
+ #endif
+@@ -271,12 +277,37 @@ int Session::PlayerCount() const {
+         return mPlayerCount;
+     }
+     int n = 0;
++    for (auto& p : mPlayers) {
++        n += p.connected ? std::max<int>(1, p.localCount) : 0;
++    }
++    return n;
++}
++
++int Session::PcCount() const {
++    if (mPhase == Phase::InGame) {
++        return mPcCount;
++    }
++    int n = 0;
+     for (auto& p : mPlayers) {
+         n += p.connected ? 1 : 0;
+     }
+     return n;
+ }
+ 
++void Session::SetLocalCount(int count) {
++    mLocalCount = std::clamp(count, 1, kMaxPlayers);
++    if (mRole == Role::Host) {
++        mPlayers[0].localCount = (uint8_t) mLocalCount;
++        if (mPhase == Phase::Lobby) {
++            BroadcastLobby();
++        }
++    } else if (mRole == Role::Client && mPhase == Phase::Lobby && mConns[0] != nullptr) {
++        Writer w;
++        w.U8((uint8_t) mLocalCount);
++        SendTo(*mConns[0], MSG_LOCALCOUNT, w.buf);
++    }
++}
++
+ void Session::SetLocalProfile(uint8_t profile) {
+     mLocalProfile = profile;
+     if (mRole == Role::Host) {
+@@ -313,10 +344,15 @@ void Session::ResetState() {
+         c = nullptr;
+     }
+     CloseSock(mListenSock);
++    CloseSock(mDiscoverySock);
+     mRole = Role::None;
+     mPhase = Phase::Idle;
+     mLocalSlot = 0;
+     mPlayerCount = 0;
++    mPcCount = 0;
++    mOwner = {};
++    mFirst = {};
++    mCountPc = {};
+     mFrame = 0;
+     mStartRequested = false;
+     mStartPending = false;
+@@ -381,8 +417,24 @@ bool Session::Host(uint16_t port, const std::string& name) {
+     mRole = Role::Host;
+     mPhase = Phase::Lobby;
+     mLocalSlot = 0;
++    mPort = port;
+     mLocalName = CleanName(name, 0);
+-    mPlayers[0] = { true, mLocalName, mLocalProfile };
++    mPlayers[0] = { true, mLocalName, mLocalProfile, (uint8_t) mLocalCount };
++
++    // Answer LAN probes so other PCs can find this game (optional).
++    intptr_t u = (intptr_t) socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
++    if (u != -1) {
++        setsockopt(NS(u), SOL_SOCKET, SO_REUSEADDR, (const char*) &one, sizeof(one));
++        sockaddr_in ua{};
++        ua.sin_family = AF_INET;
++        ua.sin_addr.s_addr = htonl(INADDR_ANY);
++        ua.sin_port = htons(port);
++        if (bind(NS(u), (sockaddr*) &ua, sizeof(ua)) == 0 && SetNonBlocking(u)) {
++            mDiscoverySock = u;
++        } else {
++            CloseSock(u);
++        }
++    }
+     mStatus = "Hosting on port " + std::to_string(port) + " - waiting for players";
+     return true;
+ }
+@@ -402,7 +454,7 @@ void Session::AcceptNewClients() {
+         c->sock = s;
+ 
+         int slot = -1;
+-        if (mPhase == Phase::Lobby) {
++        if (mPhase == Phase::Lobby && PlayerCount() < kMaxPlayers) {
+             for (int i = 1; i < kMaxPlayers; i++) {
+                 if (mConns[i] == nullptr) {
+                     slot = i;
+@@ -423,7 +475,7 @@ void Session::AcceptNewClients() {
+ }
+ 
+ bool Session::RequestStart() {
+-    if (mRole != Role::Host || mPhase != Phase::Lobby || PlayerCount() < 2) {
++    if (mRole != Role::Host || mPhase != Phase::Lobby || PlayerCount() < 2 || PlayerCount() > kMaxPlayers) {
+         return false;
+     }
+     mStartRequested = true;
+@@ -438,6 +490,7 @@ void Session::BroadcastLobby() {
+         w.U8(p.connected ? 1 : 0);
+         w.Str(p.name);
+         w.U8(p.profile);
++        w.U8(p.localCount);
+     }
+     for (int i = 1; i < kMaxPlayers; i++) {
+         if (mConns[i] != nullptr && mConns[i]->handshaken) {
+@@ -620,7 +673,7 @@ void Session::HandleMessage(Conn& c, int slotIndex, uint8_t type, const uint8_t*
+                 return;
+             }
+             c.handshaken = true;
+-            mPlayers[slotIndex] = { true, CleanName(name, slotIndex) };
++            mPlayers[slotIndex] = { true, CleanName(name, slotIndex), 0, 1 };
+             Writer w;
+             w.U8((uint8_t) slotIndex);
+             SendTo(c, MSG_WELCOME, w.buf);
+@@ -631,9 +684,15 @@ void Session::HandleMessage(Conn& c, int slotIndex, uint8_t type, const uint8_t*
+         switch (type) {
+             case MSG_INPUT: {
+                 uint32_t frame = r.U32();
+-                Pad pad = r.PadV();
+-                if (r.ok && mPhase == Phase::InGame && slotIndex < mPlayerCount) {
+-                    StoreInput(frame, slotIndex, pad);
++                int count = r.U8();
++                Pad pads[kMaxPlayers];
++                for (int i = 0; i < count && i < kMaxPlayers; i++) {
++                    pads[i] = r.PadV();
++                }
++                if (r.ok && mPhase == Phase::InGame && slotIndex < mPcCount && count == mCountPc[slotIndex]) {
++                    for (int i = 0; i < count; i++) {
++                        StoreInput(frame, mFirst[slotIndex] + i, pads[i]);
++                    }
+                 }
+                 break;
+             }
+@@ -653,6 +712,14 @@ void Session::HandleMessage(Conn& c, int slotIndex, uint8_t type, const uint8_t*
+                 }
+                 break;
+             }
++            case MSG_LOCALCOUNT: {
++                uint8_t count = r.U8();
++                if (r.ok && mPhase == Phase::Lobby) {
++                    mPlayers[slotIndex].localCount = (uint8_t) std::clamp<int>(count, 1, kMaxPlayers);
++                    BroadcastLobby();
++                }
++                break;
++            }
+             case MSG_BYE:
+                 c.closing = true;
+                 break;
+@@ -672,6 +739,9 @@ void Session::HandleMessage(Conn& c, int slotIndex, uint8_t type, const uint8_t*
+                 Writer w;
+                 w.U8(mLocalProfile);
+                 SendTo(c, MSG_PROFILE, w.buf);
++                Writer w2;
++                w2.U8((uint8_t) mLocalCount);
++                SendTo(c, MSG_LOCALCOUNT, w2.buf);
+             }
+             break;
+         case MSG_REJECT:
+@@ -691,26 +761,35 @@ void Session::HandleMessage(Conn& c, int slotIndex, uint8_t type, const uint8_t*
+                 p.connected = r.U8() != 0;
+                 p.name = r.Str();
+                 p.profile = r.U8();
++                p.localCount = r.U8();
+             }
+             break;
+         }
+         case MSG_START: {
+             int slot = r.U8();
+-            int count = r.U8();
++            int pcs = r.U8();
+             int delay = r.U8();
++            std::array<uint8_t, kMaxPlayers> counts{};
++            int total = 0;
++            for (int i = 0; i < kMaxPlayers; i++) {
++                counts[i] = r.U8();
++                total += i < pcs ? counts[i] : 0;
++            }
+             std::vector<uint8_t> state = r.Blob();
+-            if (!r.ok || count < 1 || count > kMaxPlayers || slot >= count) {
++            if (!r.ok || pcs < 1 || pcs > kMaxPlayers || slot >= pcs || total < 1 || total > kMaxPlayers) {
+                 mPendingFail = "Malformed start message";
+                 c.closing = true;
+                 break;
+             }
++            // Before the start state is applied: the game reads the player table.
++            BeginInGame(slot, pcs, counts, delay);
+             std::string err;
+             if (mHooks.applyStartState && !mHooks.applyStartState(state, err)) {
+                 mPendingFail = "Could not apply host settings: " + err;
++                mPhase = Phase::Lobby;
+                 c.closing = true;
+                 break;
+             }
+-            BeginInGame(slot, count, delay);
+             mStartPending = true;
+             break;
+         }
+@@ -747,6 +826,7 @@ bool Session::Update() {
+ 
+     if (mRole == Role::Host) {
+         AcceptNewClients();
++        PumpDiscovery();
+         for (int i = 1; i < kMaxPlayers; i++) {
+             Conn* c = mConns[i];
+             if (c == nullptr) {
+@@ -761,7 +841,7 @@ bool Session::Update() {
+                 delete c;
+                 mConns[i] = nullptr;
+                 mPlayers[i] = {};
+-                if (wasPlayer && mPhase == Phase::InGame && i < mPlayerCount) {
++                if (wasPlayer && mPhase == Phase::InGame && i < mPcCount) {
+                     Fail(who + " disconnected");
+                     return false;
+                 }
+@@ -774,7 +854,7 @@ bool Session::Update() {
+ 
+         if (mStartRequested && mPhase == Phase::Lobby) {
+             mStartRequested = false;
+-            if (PlayerCount() < 2) {
++            if (PlayerCount() < 2 || PlayerCount() > kMaxPlayers) {
+                 return false;
+             }
+             // Pack players into slots 0..n-1 so the game sees P1..Pn.
+@@ -796,16 +876,24 @@ bool Session::Update() {
+             mPlayers = packedInfo;
+             BroadcastLobby(); // clients learn the final P1..Pn names
+ 
++            std::array<uint8_t, kMaxPlayers> counts{};
++            for (int i = 0; i < n; i++) {
++                counts[i] = (uint8_t) std::max<int>(1, mPlayers[i].localCount);
++            }
++            // Player table first: the start state hook reads it.
++            BeginInGame(0, n, counts, mInputDelay);
+             std::vector<uint8_t> state = mHooks.captureStartState ? mHooks.captureStartState() : std::vector<uint8_t>{};
+             for (int i = 1; i < n; i++) {
+                 Writer w;
+                 w.U8((uint8_t) i);
+                 w.U8((uint8_t) n);
+                 w.U8((uint8_t) mInputDelay);
++                for (int k = 0; k < kMaxPlayers; k++) {
++                    w.U8(counts[k]);
++                }
+                 w.Blob(state);
+                 SendTo(*mConns[i], MSG_START, w.buf);
+             }
+-            BeginInGame(0, n, mInputDelay);
+             return true;
+         }
+         return false;
+@@ -865,8 +953,20 @@ bool Session::WaitForNetwork(int timeoutMs) {
+ 
+ // ------------------------------------------------------------------ lockstep
+ 
+-void Session::BeginInGame(int slot, int playerCount, int inputDelay) {
++void Session::BeginInGame(int slot, int pcCount, const std::array<uint8_t, kMaxPlayers>& counts, int inputDelay) {
+     mLocalSlot = slot;
++    mPcCount = pcCount;
++    mOwner = {};
++    mFirst = {};
++    mCountPc = {};
++    int playerCount = 0;
++    for (int pc = 0; pc < pcCount; pc++) {
++        mFirst[pc] = (uint8_t) playerCount;
++        mCountPc[pc] = counts[pc];
++        for (int k = 0; k < counts[pc] && playerCount < kMaxPlayers; k++) {
++            mOwner[playerCount++] = (uint8_t) pc;
++        }
++    }
+     mPlayerCount = playerCount;
+     mInputDelay = std::clamp(inputDelay, 0, kMaxInputDelay);
+     mFrame = 0;
+@@ -884,6 +984,10 @@ void Session::BeginInGame(int slot, int playerCount, int inputDelay) {
+     }
+ }
+ 
++uint8_t Session::PcMask() const {
++    return (uint8_t) ((1u << mPcCount) - 1);
++}
++
+ uint8_t Session::ExpectedMask() const {
+     return (uint8_t) ((1u << mPlayerCount) - 1);
+ }
+@@ -922,12 +1026,12 @@ void Session::RecordHash(uint32_t frame, int player, uint32_t hash) {
+         h = HashSlot{};
+         h.frame = frame;
+     }
+-    h.hash[player] = hash;
++    h.hash[player] = hash; // `player` is the PC slot here
+     h.haveMask |= (uint8_t) (1u << player);
+-    if (h.haveMask != ExpectedMask() || mDesyncFrame != UINT32_MAX) {
++    if (h.haveMask != PcMask() || mDesyncFrame != UINT32_MAX) {
+         return;
+     }
+-    for (int i = 1; i < mPlayerCount; i++) {
++    for (int i = 1; i < mPcCount; i++) {
+         if (h.hash[i] != h.hash[0]) {
+             mDesyncFrame = frame;
+             Writer w;
+@@ -938,19 +1042,26 @@ void Session::RecordHash(uint32_t frame, int player, uint32_t hash) {
+     }
+ }
+ 
+-bool Session::ExchangeInputs(const Pad& local, FramePads& out) {
++bool Session::ExchangeInputs(const Pad* local, FramePads& out) {
+     if (mPhase != Phase::InGame) {
+         return false;
+     }
+ 
+-    // 1. Publish our input for a few frames in the future.
++    // 1. Publish our players' input for a few frames in the future.
+     uint32_t target = mFrame + (uint32_t) mInputDelay;
++    int first = mFirst[mLocalSlot];
++    int count = mCountPc[mLocalSlot];
+     if (mRole == Role::Host) {
+-        StoreInput(target, 0, local);
++        for (int i = 0; i < count; i++) {
++            StoreInput(target, first + i, local[i]);
++        }
+     } else {
+         Writer w;
+         w.U32(target);
+-        w.PadV(local);
++        w.U8((uint8_t) count);
++        for (int i = 0; i < count; i++) {
++            w.PadV(local[i]);
++        }
+         SendTo(*mConns[0], MSG_INPUT, w.buf);
+     }
+ 
+@@ -958,7 +1069,7 @@ bool Session::ExchangeInputs(const Pad& local, FramePads& out) {
+     if (mHooks.stateHash && mHashInterval > 0 && mFrame % mHashInterval == 0) {
+         uint32_t h = mHooks.stateHash();
+         if (mRole == Role::Host) {
+-            RecordHash(mFrame, 0, h);
++            RecordHash(mFrame, 0, h); // the host is PC 0
+         } else {
+             Writer w;
+             w.U32(mFrame);
+@@ -983,7 +1094,8 @@ bool Session::ExchangeInputs(const Pad& local, FramePads& out) {
+             std::string who;
+             for (int i = 0; i < mPlayerCount; i++) {
+                 if (!(s.haveMask & (1u << i))) {
+-                    who = mPlayers[i].name.empty() ? "player " + std::to_string(i + 1) : mPlayers[i].name;
++                    int pc = mOwner[i];
++                    who = mPlayers[pc].name.empty() ? "player " + std::to_string(i + 1) : mPlayers[pc].name;
+                     break;
+                 }
+             }
+@@ -1012,4 +1124,167 @@ bool Session::ExchangeInputs(const Pad& local, FramePads& out) {
+     return true;
+ }
+ 
++// ------------------------------------------------------------------ LAN discovery
++
++void Session::PumpDiscovery() {
++    if (mDiscoverySock == -1) {
++        return;
++    }
++    uint8_t buf[512];
++    for (;;) {
++        sockaddr_in from{};
++        SockLen len = sizeof(from);
++        int n = (int) recvfrom(NS(mDiscoverySock), (char*) buf, sizeof(buf), 0, (sockaddr*) &from, &len);
++        if (n <= 0) {
++            return;
++        }
++        Reader r(buf, (size_t) n);
++        if (r.U32() != kProbeMagic || r.U16() != kProtocolVersion || !r.ok) {
++            continue;
++        }
++        Writer w;
++        w.U32(kReplyMagic);
++        w.U16(kProtocolVersion);
++        w.U16(mPort);
++        w.Str(mLocalName);
++        w.Str(mAdvert);
++        w.U8((uint8_t) PlayerCount());
++        w.U8(mPhase == Phase::Lobby ? 1 : 0);
++        sendto(NS(mDiscoverySock), (const char*) w.buf.data(), (int) w.buf.size(), 0, (sockaddr*) &from, len);
++    }
++}
++
++Discovery::~Discovery() {
++    Stop();
++}
++
++bool Discovery::Start(uint16_t port) {
++    Stop();
++    if (!EnsureSockets()) {
++        return false;
++    }
++    intptr_t s = (intptr_t) socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
++    if (s == -1) {
++        return false;
++    }
++    int one = 1;
++    setsockopt(NS(s), SOL_SOCKET, SO_BROADCAST, (const char*) &one, sizeof(one));
++    sockaddr_in addr{};
++    addr.sin_family = AF_INET;
++    addr.sin_addr.s_addr = htonl(INADDR_ANY);
++    addr.sin_port = 0;
++    if (bind(NS(s), (sockaddr*) &addr, sizeof(addr)) != 0 || !SetNonBlocking(s)) {
++        CloseSock(s);
++        return false;
++    }
++    mSock = s;
++    mPort = port;
++    mLastProbe = 0.0;
++    mGames.clear();
++    return true;
++}
++
++void Discovery::Stop() {
++    CloseSock(mSock);
++    mGames.clear();
++}
++
++void Discovery::Poll() {
++    if (mSock == -1) {
++        return;
++    }
++    double now = NowSeconds();
++    if (now - mLastProbe >= 1.0) {
++        mLastProbe = now;
++        Writer w;
++        w.U32(kProbeMagic);
++        w.U16(kProtocolVersion);
++        sockaddr_in to{};
++        to.sin_family = AF_INET;
++        to.sin_port = htons(mPort);
++        to.sin_addr.s_addr = htonl(INADDR_BROADCAST);
++        sendto(NS(mSock), (const char*) w.buf.data(), (int) w.buf.size(), 0, (sockaddr*) &to, sizeof(to));
++        // Also this PC itself, for testing with two copies on one machine.
++        to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++        sendto(NS(mSock), (const char*) w.buf.data(), (int) w.buf.size(), 0, (sockaddr*) &to, sizeof(to));
++    }
++    uint8_t buf[512];
++    for (;;) {
++        sockaddr_in from{};
++        SockLen len = sizeof(from);
++        int n = (int) recvfrom(NS(mSock), (char*) buf, sizeof(buf), 0, (sockaddr*) &from, &len);
++        if (n <= 0) {
++            break;
++        }
++        Reader r(buf, (size_t) n);
++        if (r.U32() != kReplyMagic || r.U16() != kProtocolVersion) {
++            continue;
++        }
++        FoundGame g;
++        g.port = r.U16();
++        g.name = r.Str();
++        g.advert = r.Str();
++        g.players = r.U8();
++        bool open = r.U8() != 0;
++        if (!r.ok || !open) {
++            continue;
++        }
++        char ip[INET_ADDRSTRLEN] = {};
++        inet_ntop(AF_INET, &from.sin_addr, ip, sizeof(ip));
++        g.address = ip;
++        g.lastSeen = now;
++        bool found = false;
++        for (auto& e : mGames) {
++            // Loopback and LAN replies from the same PC: keep the LAN address.
++            bool same = (e.address == g.address || (g.address == "127.0.0.1" && e.name == g.name)) && e.port == g.port;
++            if (same) {
++                std::string keep = e.address;
++                e = g;
++                if (g.address == "127.0.0.1") {
++                    e.address = keep;
++                }
++                found = true;
++                break;
++            }
++        }
++        if (!found) {
++            mGames.push_back(g);
++        }
++    }
++    mGames.erase(std::remove_if(mGames.begin(), mGames.end(), [&](const FoundGame& e) { return now - e.lastSeen > 4.0; }),
++                 mGames.end());
++}
++
++std::string LocalAddress() {
++    if (!EnsureSockets()) {
++        return "";
++    }
++    std::string result;
++    intptr_t s = (intptr_t) socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
++    if (s == -1) {
++        return "";
++    }
++    // "Connecting" a UDP socket sends nothing; it just picks the outgoing interface.
++    sockaddr_in to{};
++    to.sin_family = AF_INET;
++    to.sin_port = htons(9);
++    inet_pton(AF_INET, "192.168.255.255", &to.sin_addr);
++    const char* targets[] = { "8.8.8.8", "10.255.255.255", "192.168.255.255" };
++    for (const char* t : targets) {
++        inet_pton(AF_INET, t, &to.sin_addr);
++        if (connect(NS(s), (sockaddr*) &to, sizeof(to)) == 0) {
++            sockaddr_in me{};
++            SockLen len = sizeof(me);
++            if (getsockname(NS(s), (sockaddr*) &me, &len) == 0 && me.sin_addr.s_addr != htonl(INADDR_ANY)) {
++                char ip[INET_ADDRSTRLEN] = {};
++                inet_ntop(AF_INET, &me.sin_addr, ip, sizeof(ip));
++                result = ip;
++                break;
++            }
++        }
++    }
++    CloseSock(s);
++    return result;
++}
++
+ } // namespace Netplay
+diff --git a/src/port/netplay/NetplayCore.h b/src/port/netplay/NetplayCore.h
+index e63af88..5eb4bf1 100644
+--- a/src/port/netplay/NetplayCore.h
++++ b/src/port/netplay/NetplayCore.h
+@@ -2,7 +2,8 @@
+ 
+ // LAN netplay core: TCP transport + deterministic lockstep input sync.
+ //
+-// Topology is a star: one host, up to three clients. Every machine runs the
++// Topology is a star: one host and up to seven client PCs. Each PC can have
++// several local players (8 players in all). Every machine runs the
+ // full game simulation. Each frame, every player's controller input is sent to
+ // the host; the host bundles the inputs for a frame and relays the bundle to
+ // everyone. A frame only runs once its bundle is complete, so all machines feed
+@@ -66,14 +67,49 @@ struct Hooks {
+     std::function<void()> onSessionEnd;
+ };
+ 
++// One entry per PC (connection slot).
+ struct PlayerInfo {
+     bool connected = false;
+     std::string name;
+     // Small per-player choice shared through the lobby (the game uses it for
+     // the player's character).
+     uint8_t profile = 0;
++    // Players on this PC (each with their own controller), 1..8.
++    uint8_t localCount = 1;
+ };
+ 
++// A game found on the local network (see Discovery).
++struct FoundGame {
++    std::string address; // IPv4 of the host
++    uint16_t port = kDefaultPort;
++    std::string name;    // host's name
++    std::string advert;  // what the host is playing (game-defined text)
++    int players = 0;     // players in the lobby
++    double lastSeen = 0.0;
++};
++
++// Finds hosts on the LAN: broadcasts a probe once a second and collects the
++// replies (UDP, same port number as the game).
++class Discovery {
++  public:
++    ~Discovery();
++    bool Start(uint16_t port = kDefaultPort);
++    void Stop();
++    bool Active() const { return mSock != -1; }
++    // Call every frame while scanning.
++    void Poll();
++    const std::vector<FoundGame>& Games() const { return mGames; }
++
++  private:
++    intptr_t mSock = -1;
++    uint16_t mPort = kDefaultPort;
++    double mLastProbe = 0.0;
++    std::vector<FoundGame> mGames;
++};
++
++// This PC's IPv4 address on the LAN (best guess), e.g. "192.168.1.23".
++std::string LocalAddress();
++
+ class Session {
+   public:
+     Session();
+@@ -90,6 +126,10 @@ class Session {
+     void SetInputDelay(int frames);
+     // This player's lobby choice (see PlayerInfo::profile).
+     void SetLocalProfile(uint8_t profile);
++    // How many players are on this PC (lobby only), 1..8.
++    void SetLocalCount(int count);
++    // Host: text other PCs see when they find this game on the LAN.
++    void SetAdvert(const std::string& advert) { mAdvert = advert; }
+     // Host only: match options shown to everyone in the lobby.
+     void SetLobbyOptions(uint8_t options);
+     uint8_t LobbyOptions() const { return mLobbyOptions; }
+@@ -99,18 +139,29 @@ class Session {
+     // starts; the caller must then put the game into its known start state
+     // before running the next frame (which is lockstep frame 0).
+     bool Update();
+-    // Exchange inputs for the frame about to run. `local` is this machine's
+-    // controller. On success `out` holds every player's input for this frame.
++    // Exchange inputs for the frame about to run. `local` holds this PC's
++    // players' controllers (LocalCount() of them). On success `out` holds
++    // every player's input for this frame, by global player number.
+     // Blocks (up to the timeout) until all inputs for the frame have arrived.
+     // Returns false if netplay is not in-game or the session dropped.
+-    bool ExchangeInputs(const Pad& local, FramePads& out);
++    bool ExchangeInputs(const Pad* local, FramePads& out);
++    bool ExchangeInputs(const Pad& local, FramePads& out) { return ExchangeInputs(&local, out); }
+ 
+     // --- status ---
+     Role GetRole() const { return mRole; }
+     Phase GetPhase() const { return mPhase; }
+     bool IsInGame() const { return mPhase == Phase::InGame; }
++    // This PC's connection slot (0 = host).
+     int LocalSlot() const { return mLocalSlot; }
++    // Players in all (in game: fixed; in the lobby: everyone connected).
+     int PlayerCount() const;
++    // PCs in the session.
++    int PcCount() const;
++    // This PC's players: global numbers LocalFirst() .. LocalFirst()+LocalCount()-1.
++    int LocalFirst() const { return mPhase == Phase::InGame ? mFirst[mLocalSlot] : 0; }
++    int LocalCount() const { return mPhase == Phase::InGame ? mCountPc[mLocalSlot] : mLocalCount; }
++    // In game: the PC slot that a global player is on.
++    int OwnerOf(int player) const { return (player >= 0 && player < kMaxPlayers) ? mOwner[player] : 0; }
+     int InputDelay() const { return mInputDelay; }
+     uint32_t CurrentFrame() const { return mFrame; }
+     const std::array<PlayerInfo, kMaxPlayers>& Players() const { return mPlayers; }
+@@ -143,18 +194,28 @@ class Session {
+     void Broadcast(uint8_t type, const std::vector<uint8_t>& payload);
+     void BroadcastLobby();
+     bool WaitForNetwork(int timeoutMs);
+-    void BeginInGame(int slot, int playerCount, int inputDelay);
++    void BeginInGame(int slot, int pcCount, const std::array<uint8_t, kMaxPlayers>& counts, int inputDelay);
++    void PumpDiscovery();
+     InputSlot& SlotFor(uint32_t frame);
+     void StoreInput(uint32_t frame, int player, const Pad& pad);
+     void StoreFrame(uint32_t frame, const FramePads& pads);
+     void RecordHash(uint32_t frame, int player, uint32_t hash);
+     uint8_t ExpectedMask() const;
++    uint8_t PcMask() const;
+ 
+     Hooks mHooks;
+     Role mRole = Role::None;
+     Phase mPhase = Phase::Idle;
+     int mLocalSlot = 0;
+-    int mPlayerCount = 0; // fixed once in game
++    int mPlayerCount = 0; // players in all, fixed once in game
++    int mPcCount = 0;     // PCs, fixed once in game
++    int mLocalCount = 1;  // lobby: players on this PC
++    std::array<uint8_t, kMaxPlayers> mOwner{};   // global player -> PC slot
++    std::array<uint8_t, kMaxPlayers> mFirst{};   // PC slot -> first global player
++    std::array<uint8_t, kMaxPlayers> mCountPc{}; // PC slot -> players on it
++    std::string mAdvert;
++    intptr_t mDiscoverySock = -1; // host: answers LAN probes
++    uint16_t mPort = kDefaultPort;
+     int mInputDelay = 2;
+     uint32_t mFrame = 0;
+     bool mStartRequested = false;
+diff --git a/src/port/ui/CouchWindow.cpp b/src/port/ui/CouchWindow.cpp
+index 54ace94..bdefeaf 100644
+--- a/src/port/ui/CouchWindow.cpp
++++ b/src/port/ui/CouchWindow.cpp
+@@ -8,6 +8,7 @@
+ #include "ship/Context.h"
+ #include "ship/window/gui/Gui.h"
+ #include "port/couch/CouchParty.h"
++#include "port/couch/couch.h"
+ 
+ extern "C" {
+ #include "main.h"
+@@ -119,7 +120,8 @@ void CouchResultsWindow::DrawElement() {
+     for (int i = 0; i < Couch::kNumResultOptions; i++) {
+         bool selected = i == r.cursor;
+         std::string label = std::string(selected ? "> " : "  ") + kOptions[i];
+-        if (ImGui::Selectable(label.c_str(), selected)) {
++        // LAN GAME: controllers only, so every PC picks on the same frame.
++        if (ImGui::Selectable(label.c_str(), selected) && !couch_lan_mode()) {
+             Couch::ChooseResult(i);
+         }
+     }
+diff --git a/src/port/ui/GameDraw.h b/src/port/ui/GameDraw.h
+new file mode 100644
+index 0000000..39e9f2e
+--- /dev/null
++++ b/src/port/ui/GameDraw.h
+@@ -0,0 +1,77 @@
++#pragma once
++
++// Drawing with the game's own menu font and boxes, from C++ (N64 screen
++// coordinates, 320x240). Text y is the baseline.
++
++#include <cstdio>
++#include <string>
++
++extern "C" {
++#include "main.h"
++#include "menu_items.h"
++#include <defines.h>
++}
++
++namespace GameDraw {
++
++// The game font has no ':', '<', '/', '_' etc., and anything it can't draw
++// stops the whole string, so those become spaces (and letters upper case).
++inline std::string Printable(const std::string& in) {
++    std::string out;
++    for (char c : in) {
++        bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == ' ' ||
++                  c == '!' || c == '-' || c == '?' || c == '\'' || c == '.' || c == '"' || c == '*' || c == '+' ||
++                  c == ',';
++        out.push_back(ok ? (char) ((c >= 'a' && c <= 'z') ? c - 32 : c) : ' ');
++    }
++    return out;
++}
++
++// Left-aligned from x.
++inline void Text(int x, int y, const std::string& s, int color, float scale) {
++    std::string p = Printable(s);
++    if (p.empty()) {
++        return;
++    }
++    char buf[128];
++    std::snprintf(buf, sizeof(buf), "%s", p.c_str());
++    set_text_color(color);
++    print_text_mode_1(x, y, buf, 0, scale, scale);
++}
++
++// Centred on x.
++inline void TextCentered(int x, int y, const std::string& s, int color, float scale) {
++    std::string p = Printable(s);
++    if (p.empty()) {
++        return;
++    }
++    char buf[128];
++    std::snprintf(buf, sizeof(buf), "%s", p.c_str());
++    set_text_color(color);
++    print_text1_center_mode_1(x, y, buf, 0, scale, scale);
++}
++
++// Ending at x.
++inline void TextRight(int x, int y, const std::string& s, int color, float scale) {
++    std::string p = Printable(s);
++    if (p.empty()) {
++        return;
++    }
++    char buf[128];
++    std::snprintf(buf, sizeof(buf), "%s", p.c_str());
++    set_text_color(color);
++    print_text1_left(x, y, buf, 0, scale, scale); // the game's "left" mode right-aligns
++}
++
++// Translucent box (alpha 0-255).
++inline void Box(int x0, int y0, int x1, int y1, int r, int g, int b, int a) {
++    gDisplayListHead = draw_box(gDisplayListHead, x0, y0, x1, y1, r, g, b, a);
++}
++
++// Box with a border.
++inline void Panel(int x0, int y0, int x1, int y1, int alpha = 215) {
++    Box(x0, y0, x1, y1, 255, 216, 0, 255);
++    Box(x0 + 2, y0 + 2, x1 - 2, y1 - 2, 8, 12, 40, alpha);
++}
++
++} // namespace GameDraw
+diff --git a/src/port/ui/ImguiUI.cpp b/src/port/ui/ImguiUI.cpp
+index 0c1bf80..8a924c8 100644
+--- a/src/port/ui/ImguiUI.cpp
++++ b/src/port/ui/ImguiUI.cpp
+@@ -46,8 +46,6 @@ std::shared_ptr<Ship::GuiWindow> mContentBrowserWindow;
+ std::shared_ptr<Ship::GuiWindow> mNetplayWindow;
+ std::shared_ptr<Ship::GuiWindow> mLocalPlayWindow;
+ std::shared_ptr<Ship::GuiWindow> mLeaderboardWindow;
+-std::shared_ptr<Ship::GuiWindow> mLeaderboardEntryWindow;
+-std::shared_ptr<Ship::GuiWindow> mTrackRecordsWindow;
+ std::shared_ptr<Ship::GuiWindow> mCouchResultsWindow;
+ 
+ void SetupGuiElements() {
+@@ -106,20 +104,6 @@ void SetupGuiElements() {
+ 
+     mLeaderboardWindow = std::make_shared<LeaderboardWindow>("gLeaderboard.WindowOpen", "Leaderboards", ImVec2(560, 420));
+     gui->AddGuiWindow(mLeaderboardWindow);
+-    // Opened by the game after a top-10 Time Trial; starts hidden every launch.
+-    CVarSetInteger("gLeaderboard.EntryOpen", 0);
+-    mLeaderboardEntryWindow = std::make_shared<LeaderboardEntryWindow>(
+-        "gLeaderboard.EntryOpen", "Time Trial Record", ImVec2(-1, -1),
+-        ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings);
+-    gui->AddGuiWindow(mLeaderboardEntryWindow);
+-
+-    // Opened and closed by the game (DATA screens, Couch Party results).
+-    CVarSetInteger("gLeaderboard.RecordsOpen", 0);
+-    mTrackRecordsWindow = std::make_shared<TrackRecordsWindow>(
+-        "gLeaderboard.RecordsOpen", "Track Records", ImVec2(-1, -1),
+-        ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
+-            ImGuiWindowFlags_NoFocusOnAppearing);
+-    gui->AddGuiWindow(mTrackRecordsWindow);
+     CVarSetInteger("gCouchParty.ResultsOpen", 0);
+     mCouchResultsWindow = std::make_shared<CouchResultsWindow>(
+         "gCouchParty.ResultsOpen", "Couch Party Results", ImVec2(-1, -1),
+@@ -140,8 +124,6 @@ void Destroy() {
+     mNetplayWindow = nullptr;
+     mLocalPlayWindow = nullptr;
+     mLeaderboardWindow = nullptr;
+-    mLeaderboardEntryWindow = nullptr;
+-    mTrackRecordsWindow = nullptr;
+     mCouchResultsWindow = nullptr;
+ }
+ 
+diff --git a/src/port/ui/LeaderboardWindow.cpp b/src/port/ui/LeaderboardWindow.cpp
+index 043c66e..d81ac98 100644
+--- a/src/port/ui/LeaderboardWindow.cpp
++++ b/src/port/ui/LeaderboardWindow.cpp
+@@ -23,8 +23,6 @@ namespace GameUI {
+ 
+ namespace {
+ 
+-std::shared_ptr<Ship::GuiWindow> sEntryWindow;
+-const char* const kEntryWindowName = "Time Trial Record";
+ const ImVec4 kGold(1.0f, 0.84f, 0.2f, 1.0f);
+ const ImVec4 kGreen(0.45f, 0.9f, 0.45f, 1.0f);
+ const ImVec4 kGrey(0.65f, 0.65f, 0.65f, 1.0f);
+@@ -109,162 +107,8 @@ void DrawBoardTable(const Leaderboard::Board* board, size_t highlight, const Lea
+     ImGui::EndTable();
+ }
+ 
+-// The name as arcade-style letter boxes with the gamepad cursor.
+-void DrawNameBoxes(const Leaderboard::PendingRecord& p) {
+-    const float box = ImGui::GetFontSize() * 1.6f;
+-    const float gap = 3.0f;
+-    ImVec2 origin = ImGui::GetCursorScreenPos();
+-    ImDrawList* dl = ImGui::GetWindowDrawList();
+-    size_t len = std::strlen(p.name);
+-    for (int i = 0; i < (int) Leaderboard::kMaxNameLength; i++) {
+-        ImVec2 a(origin.x + i * (box + gap), origin.y);
+-        ImVec2 b(a.x + box, a.y + box);
+-        bool cursor = i == p.cursor;
+-        dl->AddRectFilled(a, b, cursor ? IM_COL32(70, 100, 160, 255) : IM_COL32(40, 40, 40, 255), 3.0f);
+-        dl->AddRect(a, b, cursor ? IM_COL32(255, 220, 80, 255) : IM_COL32(110, 110, 110, 255), 3.0f, 0,
+-                    cursor ? 2.0f : 1.0f);
+-        if ((size_t) i < len && p.name[i] != ' ') {
+-            char c[2] = { p.name[i], 0 };
+-            ImVec2 ts = ImGui::CalcTextSize(c);
+-            dl->AddText(ImVec2(a.x + (box - ts.x) / 2, a.y + (box - ts.y) / 2), IM_COL32(255, 255, 255, 255), c);
+-        }
+-    }
+-    ImGui::Dummy(ImVec2(Leaderboard::kMaxNameLength * (box + gap), box));
+-}
+-
+-// The DATA screens list the 16 stock tracks cup by cup.
+-const char* const kDataTracks[16] = {
+-    "mk:luigi_raceway", "mk:moo_moo_farm", "mk:koopa_troopa_beach", "mk:kalimari_desert",
+-    "mk:toads_turnpike", "mk:frappe_snowland", "mk:choco_mountain", "mk:mario_raceway",
+-    "mk:wario_stadium", "mk:sherbet_land", "mk:royal_raceway", "mk:bowsers_castle",
+-    "mk:dk_jungle", "mk:yoshi_valley", "mk:banshee_boardwalk", "mk:rainbow_road",
+-};
+-const char* const kRecordsWindowName = "Track Records";
+-
+-bool OnDataScreens() {
+-    return gGamestate < RACING && (gMenuSelection == DATA_MENU || gMenuSelection == COURSE_DATA_MENU);
+-}
+-
+ } // namespace
+ 
+-void UpdateTrackRecordsOverlay() {
+-    static std::shared_ptr<Ship::GuiWindow> window;
+-    if (!window) {
+-        auto* ctx = Ship::Context::GetRawInstance();
+-        if (!ctx || !ctx->GetWindow() || !ctx->GetWindow()->GetGui()) {
+-            return;
+-        }
+-        window = ctx->GetWindow()->GetGui()->GetGuiWindow(kRecordsWindowName);
+-        if (!window) {
+-            return;
+-        }
+-    }
+-    bool want = OnDataScreens() && !CVarGetInteger("gLeaderboard.HideOnDataScreen", 0);
+-    if (want && !window->IsVisible()) {
+-        window->Show();
+-    } else if (!want && window->IsVisible()) {
+-        window->Hide();
+-    }
+-}
+-
+-void TrackRecordsWindow::DrawElement() {
+-    if (!OnDataScreens()) {
+-        ImGui::TextColored(kGrey, "Open DATA from the main menu (R button) to see each track's records.");
+-        return;
+-    }
+-    int index = std::clamp<int>(gTimeTrialDataCourseIndex, 0, 15);
+-    const std::string track = kDataTracks[index];
+-    if (ImGui::IsWindowAppearing()) {
+-        ImVec2 vp = ImGui::GetMainViewport()->Size;
+-        ImVec2 pos = ImGui::GetMainViewport()->Pos;
+-        ImGui::SetWindowPos(ImVec2(pos.x + vp.x - 380.0f, pos.y + 40.0f));
+-    }
+-    ImGui::TextColored(kGold, "%s", Leaderboard::TrackDisplayName(track).c_str());
+-    ImGui::SameLine();
+-    ImGui::TextColored(kGrey, "- Time Trial top %zu", Leaderboard::kMaxEntries);
+-    DrawBoardTable(Leaderboard::GetStore().Get(track), 0, nullptr, false);
+-    ImGui::TextColored(kGrey, "Move the cursor on the DATA screen to change track.");
+-}
+-
+-void ShowLeaderboardEntryWindow(bool show) {
+-    if (!sEntryWindow) {
+-        sEntryWindow = Ship::Context::GetRawInstance()->GetWindow()->GetGui()->GetGuiWindow(kEntryWindowName);
+-    }
+-    if (sEntryWindow) {
+-        if (show) {
+-            sEntryWindow->Show();
+-        } else {
+-            sEntryWindow->Hide();
+-        }
+-    }
+-}
+-
+-// ------------------------------------------------------------ name entry
+-
+-void LeaderboardEntryWindow::UpdateElement() {
+-    // Closed with the window's X: treat as Skip.
+-    if (!IsVisible() && Leaderboard::Pending().active) {
+-        Leaderboard::SkipPending();
+-    }
+-}
+-
+-void LeaderboardEntryWindow::DrawElement() {
+-    Leaderboard::PendingRecord& p = Leaderboard::Pending();
+-    if (!p.active) {
+-        ImGui::TextColored(kGrey, "No record to save.");
+-        if (ImGui::Button("Close")) {
+-            SetVisibility(false);
+-        }
+-        return;
+-    }
+-    if (ImGui::IsWindowAppearing()) {
+-        ImVec2 size = ImGui::GetWindowSize();
+-        ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+-        ImGui::SetWindowPos(ImVec2(center.x - size.x / 2, center.y - size.y / 2));
+-    }
+-
+-    ImGui::TextColored(kGold, "NEW RECORD - %s place!", Ordinal(p.rank).c_str());
+-    ImGui::Text("%s   %s", p.trackName.c_str(), Leaderboard::FormatTime(p.entry.timeCs).c_str());
+-    ImGui::TextColored(kGrey, "Laps: %s  %s  %s", Leaderboard::FormatTime(p.entry.lapsCs[0]).c_str(),
+-                       Leaderboard::FormatTime(p.entry.lapsCs[1]).c_str(),
+-                       Leaderboard::FormatTime(p.entry.lapsCs[2]).c_str());
+-    ImGui::Spacing();
+-    ImGui::SeparatorText("Enter your name");
+-
+-    // The gamepad edited the name: let go of the text box so it shows the change.
+-    if (p.padEdited) {
+-        p.padEdited = false;
+-        if (ImGui::GetActiveID() != 0) {
+-            ImGui::ClearActiveID();
+-        }
+-    }
+-    DrawNameBoxes(p);
+-    ImGui::Spacing();
+-
+-    if (ImGui::IsWindowAppearing()) {
+-        ImGui::SetKeyboardFocusHere();
+-    }
+-    ImGui::SetNextItemWidth(220.0f);
+-    bool enter = ImGui::InputText("##name", p.name, sizeof(p.name), ImGuiInputTextFlags_EnterReturnsTrue);
+-    ImGui::SameLine();
+-    if (ImGui::Button("Save") || enter) {
+-        Leaderboard::SubmitPending();
+-        return;
+-    }
+-    ImGui::SameLine();
+-    if (ImGui::Button("Skip")) {
+-        Leaderboard::SkipPending();
+-        return;
+-    }
+-    // Keep the arcade cursor inside the name typed with the keyboard.
+-    p.cursor = std::min<int>(p.cursor, (int) Leaderboard::kMaxNameLength - 1);
+-
+-    ImGui::TextColored(kGrey, "Keyboard: type, then Enter.");
+-    ImGui::TextColored(kGrey, "Gamepad: Up/Down letter, Left/Right or A/B move, Start save, Z skip.");
+-    ImGui::Spacing();
+-    DrawBoardTable(Leaderboard::GetStore().Get(p.track), p.rank, &p.entry, true);
+-}
+-
+ // ------------------------------------------------------------ browse
+ 
+ void LeaderboardWindow::DrawElement() {
+diff --git a/src/port/ui/LeaderboardWindow.h b/src/port/ui/LeaderboardWindow.h
+index e781f40..735d3e5 100644
+--- a/src/port/ui/LeaderboardWindow.h
++++ b/src/port/ui/LeaderboardWindow.h
+@@ -17,33 +17,4 @@ class LeaderboardWindow : public Ship::GuiWindow {
+     }
+ };
+ 
+-// Shown after a time trial that makes the top 10: enter your name.
+-class LeaderboardEntryWindow : public Ship::GuiWindow {
+-  public:
+-    using Ship::GuiWindow::GuiWindow;
+-
+-  protected:
+-    void InitElement() override {
+-    }
+-    void DrawElement() override;
+-    void UpdateElement() override;
+-};
+-
+-// Shown beside the game's DATA screens: the leaderboard of the highlighted track.
+-class TrackRecordsWindow : public Ship::GuiWindow {
+-  public:
+-    using Ship::GuiWindow::GuiWindow;
+-
+-  protected:
+-    void InitElement() override {
+-    }
+-    void DrawElement() override;
+-    void UpdateElement() override {
+-    }
+-};
+-
+-void ShowLeaderboardEntryWindow(bool show);
+-// Called every frame: opens/closes the track records beside the DATA screens.
+-void UpdateTrackRecordsOverlay();
+-
+ } // namespace GameUI
+diff --git a/src/port/ui/NetplayWindow.cpp b/src/port/ui/NetplayWindow.cpp
+index 0317139..3c572a9 100644
+--- a/src/port/ui/NetplayWindow.cpp
++++ b/src/port/ui/NetplayWindow.cpp
+@@ -117,6 +117,7 @@ void NetplayWindow::DrawElement() {
+             if (ImGui::Button("Host")) {
+                 SaveSettings();
+                 s.SetLocalProfile((uint8_t) sCharacter);
++                s.SetLocalCount(1); // this window: one player per PC
+                 if (s.Host((uint16_t) sPort, sName)) {
+                     s.SetInputDelay(sDelay);
+                     s.SetLobbyOptions(sSplitScreen ? Netplay::kOptionSplitScreen : 0);
+@@ -128,6 +129,7 @@ void NetplayWindow::DrawElement() {
+             if (ImGui::Button("Join")) {
+                 SaveSettings();
+                 s.SetLocalProfile((uint8_t) sCharacter);
++                s.SetLocalCount(1);
+                 s.Join(sAddress, (uint16_t) sPort, sName);
+             }
+             ImGui::Spacing();
+@@ -207,7 +209,7 @@ void NetplayWindow::DrawElement() {
+         }
+ 
+         case Netplay::Phase::InGame: {
+-            ImGui::TextColored(kGreen, "Netplay running - you are P%d of %d", s.LocalSlot() + 1, s.PlayerCount());
++            ImGui::TextColored(kGreen, "Netplay running - you are P%d of %d", s.LocalFirst() + 1, s.PlayerCount());
+             DrawPlayers(s);
+             ImGui::Text("Frame %u   input delay %d   last wait %.1f ms", s.CurrentFrame(), s.InputDelay(),
+                         s.LastStallMs());
+-- 
+2.43.0
+

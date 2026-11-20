@@ -1,0 +1,101 @@
+From a7e3772ad30368d64e0a05636106fba512855e1f Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 29 Oct 2026 17:42:25 +0000
+Subject: [PATCH 16/17] Luigi Raceway/Wario Stadium TV: show player 1's view in
+ split-screen races
+
+The screen copied the whole finished picture, so in Couch Party and local
+multiplayer it showed every view squashed together.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Qq7B1uqfWVWykYRDDMiuXa
+---
+ src/main.c                            |  6 ++++-
+ src/port/localplay/localplay.h        |  1 +
+ src/port/localplay/localplay_render.c | 34 +++++++++++++++++++++++++++
+ 3 files changed, 40 insertions(+), 1 deletion(-)
+
+diff --git a/src/main.c b/src/main.c
+index 231b95a..cd0636c 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -837,7 +837,11 @@ void race_logic_loop(void) {
+     // Copies after all the main rendering is complete. This is accurate to hardware.
+     // This means things like jumbotron will have the pause menu rendered in it.
+     // To avoid that, this line can be moved above func_800591B4.
+-    FB_WriteFramebufferSliceToCPU(&gDisplayListHead, gPortFramebuffers[sRenderingFramebuffer], true);
++    if (localplay_views_active()) {
++        localplay_capture_jumbotron(gPortFramebuffers[sRenderingFramebuffer]);
++    } else {
++        FB_WriteFramebufferSliceToCPU(&gDisplayListHead, gPortFramebuffers[sRenderingFramebuffer], true);
++    }
+     gDPFullSync(gDisplayListHead++);
+     gSPEndDisplayList(gDisplayListHead++);
+ 
+diff --git a/src/port/localplay/localplay.h b/src/port/localplay/localplay.h
+index 015782a..8a39fc9 100644
+--- a/src/port/localplay/localplay.h
++++ b/src/port/localplay/localplay.h
+@@ -20,6 +20,7 @@ extern float gLocalViewAspectOverride;
+ 
+ // True while a local multi-view race is on screen.
+ bool localplay_views_active(void);
++void localplay_capture_jumbotron(void* buffer); // TV screens: first player's view only
+ 
+ // Once per frame, before the game frame: applies settings, assigns gamepads,
+ // spans the window over monitors.
+diff --git a/src/port/localplay/localplay_render.c b/src/port/localplay/localplay_render.c
+index a279f65..6e9b88b 100644
+--- a/src/port/localplay/localplay_render.c
++++ b/src/port/localplay/localplay_render.c
+@@ -126,6 +126,33 @@ static void compose_view(s32 fb, LPRect rect, u32 texW, u32 texH) {
+     gDPImageRectangle(gDisplayListHead++, x0, y0, 0, 0, x1, y1, texW, texH, G_TX_RENDERTILE, texW, texH);
+ }
+ 
++extern s32 gN64ResFrameBuffer;
++static s32 sJumboView = -1; // view whose picture goes on the track's TV screens
++
++// Luigi Raceway / Wario Stadium TV: copy the first player's own view (its
++// middle 4:3 part, scaled to 320x240) instead of the whole split screen.
++void localplay_capture_jumbotron(void* buffer) {
++    s32 v = sJumboView;
++    u32 w, h;
++    s32 s0 = 0;
++    if (v < 0 || sViewFb[v] < 0) {
++        return;
++    }
++    w = sViewFbW[v];
++    h = sViewFbH[v];
++    if ((float) w / (float) h > 4.0f / 3.0f) {
++        s0 = (s32) ((w - h * 4.0f / 3.0f) / 2.0f);
++    }
++    gsSPSetFB(gDisplayListHead++, gN64ResFrameBuffer);
++    compose_setup();
++    gDPSetTextureImageFB(gDisplayListHead++, 0, 0, 0, sViewFb[v]);
++    gDPImageRectangle(gDisplayListHead++, 0, 0, s0, 0, SCREEN_WIDTH << 2, SCREEN_HEIGHT << 2, w - s0, h,
++                      G_TX_RENDERTILE, w, h);
++    gDPReadFB(gDisplayListHead++, gN64ResFrameBuffer, buffer, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, true);
++    gsSPResetFB(gDisplayListHead++);
++    gDPSetScissor(gDisplayListHead++, G_SC_NON_INTERLACE, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
++}
++
+ void localplay_render_views(void) {
+     LPRect rects[NETRACE_MAX_HUMANS];
+     s32 count = gNetHumanCount;
+@@ -188,6 +215,13 @@ void localplay_render_views(void) {
+ 
+     gLocalViewAspectOverride = 0.0f;
+     gNetViewPlayer = 0;
++    sJumboView = -1;
++    for (v = 0; v < count; v++) {
++        if (drawn[v]) {
++            sJumboView = v;
++            break;
++        }
++    }
+ 
+     init_rdp();
+     compose_setup();
+-- 
+2.43.0
+

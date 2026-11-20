@@ -1,0 +1,107 @@
+From a2ee2704595ec8e5d53a99b6033e7585b63671c3 Mon Sep 17 00:00:00 2001
+From: T3chnobone <98963290+T3chnobone@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 16:47:03 +0000
+Subject: [PATCH 06/17] Show the mouse cursor while the menu is open; report
+ fatal errors
+
+- Force the cursor visible (and release mouse capture) while the port menu
+  is open, and apply "Cursor Always Visible" from startup.
+- Windows: report uncaught exceptions and extraction errors instead of
+  closing silently; keep room to report stack overflows; 16 MB main stack.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Qq7B1uqfWVWykYRDDMiuXa
+---
+ src/port/Game.cpp          | 23 +++++++++++++++++++++++
+ src/port/GameExtractor.cpp |  6 ++++++
+ src/port/SpaghettiGui.cpp  | 16 ++++++++++++++++
+ 3 files changed, 45 insertions(+)
+
+diff --git a/src/port/Game.cpp b/src/port/Game.cpp
+index 33adf28..21beac4 100644
+--- a/src/port/Game.cpp
++++ b/src/port/Game.cpp
+@@ -7,6 +7,10 @@
+ #include <fast/Fast3dWindow.h>
+ #include <memory>
+ #include <atomic>
++#include <exception>
++#ifdef _WIN32
++#include <windows.h>
++#endif
+ #include "engine/World.h"
+ #include "engine/AllTracks.h"
+ 
+@@ -1056,6 +1060,25 @@ extern "C"
+ #ifdef _WIN32
+     // Allow non-ascii characters for Windows
+     setlocale(LC_ALL, ".UTF8");
++    // Keep room to report a stack overflow instead of vanishing silently.
++    ULONG stackGuarantee = 64 * 1024;
++    SetThreadStackGuarantee(&stackGuarantee);
++    // An exception nobody catches: say what it was before the window closes.
++    std::set_terminate([] {
++        std::string what = "unknown error";
++        if (auto ex = std::current_exception()) {
++            try {
++                std::rethrow_exception(ex);
++            } catch (const std::exception& e) {
++                what = e.what();
++            } catch (...) {
++            }
++        }
++        fprintf(stderr, "\n*** Fatal error: %s ***\n", what.c_str());
++        MessageBoxA(nullptr, ("SpaghettiKart stopped with an error:\n\n" + what).c_str(), "SpaghettiKart",
++                    MB_OK | MB_ICONERROR | MB_TOPMOST);
++        std::abort();
++    });
+ #endif
+ #if defined(__APPLE__)
+     // Disable the macOS "press and hold" accent/diacritic popup for this app. SDL keeps a Cocoa text
+diff --git a/src/port/GameExtractor.cpp b/src/port/GameExtractor.cpp
+index 4e8b4df..bbcc1db 100644
+--- a/src/port/GameExtractor.cpp
++++ b/src/port/GameExtractor.cpp
+@@ -195,6 +195,12 @@ bool GameExtractor::GenerateOTR() const {
+     try {
+         Companion::Instance->Init(ExportType::Binary);
+     } catch (const std::exception& e) {
++        SPDLOG_ERROR("ROM extraction failed: {}", e.what());
++        printf("\n*** ROM extraction failed: %s ***\n", e.what());
++        return false;
++    } catch (...) {
++        SPDLOG_ERROR("ROM extraction failed with an unknown error");
++        printf("\n*** ROM extraction failed with an unknown error ***\n");
+         return false;
+     }
+ 
+diff --git a/src/port/SpaghettiGui.cpp b/src/port/SpaghettiGui.cpp
+index 17bfb2e..b8b3862 100644
+--- a/src/port/SpaghettiGui.cpp
++++ b/src/port/SpaghettiGui.cpp
+@@ -122,6 +122,22 @@ void SpaghettiGui::DrawMenu() {
+         }
+     }
+ 
++    // Show the mouse cursor whenever the menu is open (and always, if "Cursor
++    // Always Visible" is on, including at startup). Otherwise it could stay
++    // hidden or captured by the game while using the menu.
++    {
++        static int sForced = -1;
++        int force = (GetMenuOrMenubarVisible() || CVarGetInteger("gSettings.CursorVisibility", 0)) ? 1 : 0;
++        if (force != sForced) {
++            wnd->SetForceCursorVisibility(force != 0);
++            if (force) {
++                wnd->SetMouseCapture(false);
++                wnd->SetCursorVisibility(true);
++            }
++            sForced = force;
++        }
++    }
++
+ #if __APPLE__
+     if ((ImGui::IsKeyDown(ImGuiKey_LeftSuper) || ImGui::IsKeyDown(ImGuiKey_RightSuper)) &&
+         ImGui::IsKeyPressed(ImGuiKey_R, false)) {
+-- 
+2.43.0
+

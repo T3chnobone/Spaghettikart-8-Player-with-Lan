@@ -32,7 +32,10 @@ start on the usual 4-player spots and players 5–8 beside them.
 After each race a results panel shows the places and each player's wins this
 session. Any player picks **Race again**, **Change course**, **Change drivers**
 (back to character select with everyone still joined) or **Quit to menu** with
-Up/Down and A. The pause menu works as in a normal VS race.
+Up/Down and A. For the first second and a half the options are greyed out
+("Get ready...") so buttons still being pressed from the race can't pick one,
+and a button held through that pause has to be let go and pressed again. The
+pause menu works as in a normal VS race.
 
 To get the stock 3P/4P columns back, untick **COUCH PARTY on the main menu**
 in Settings → Local Multiplayer. Couch Party is off during LAN netplay.

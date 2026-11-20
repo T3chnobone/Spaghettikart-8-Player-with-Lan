@@ -1,0 +1,133 @@
+From 90c4a3a568a4972a375000fde17a52d77f45753e Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 20 Nov 2026 08:34:13 +0000
+Subject: [PATCH] Couch Party / LAN: don't let end-of-race presses skip the
+ results
+
+The results opened with "Race again" highlighted and took the next A or
+Start press from any player. Players still pressing buttons as the race
+ended picked it straight away, so the next race started without the
+results ever being seen.
+
+The results now ignore controllers and the mouse for about 1.5 seconds
+(45 game frames, counted in the controller hook so LAN PCs unlock on the
+same frame), and a button held through that pause isn't a press. The
+options are greyed out with "Get ready..." until then.
+---
+ src/port/couch/CouchParty.cpp | 16 +++++++++-------
+ src/port/couch/CouchParty.h   |  6 ++++++
+ src/port/ui/CouchWindow.cpp   | 11 ++++++++++-
+ 3 files changed, 25 insertions(+), 8 deletions(-)
+
+diff --git a/src/port/couch/CouchParty.cpp b/src/port/couch/CouchParty.cpp
+index 040754e6b..7534bc539 100644
+--- a/src/port/couch/CouchParty.cpp
++++ b/src/port/couch/CouchParty.cpp
+@@ -63,9 +63,6 @@ bool sOwnsBigRace = false;
+ bool sLanMode = false;
+ bool sLanEnded = false; // the session dropped; tidy up once back on the menus
+ bool sWasCouch = false;
+-// Take the buttons already held as the starting state (e.g. A held while
+-// driving when the results appear) so only new presses count.
+-bool sPrimeEdges = false;
+ 
+ // Race tracking.
+ std::vector<int> sFinishOrder;
+@@ -119,15 +116,14 @@ void ClearEdges() {
+     for (auto& e : sEdges) {
+         e = PadEdge{};
+     }
+-    sPrimeEdges = true;
+ }
+ 
+-// Records what's held without acting on it.
++// Records what's held without acting on it, so a button that is still held
++// when the results start taking input (A held while driving) isn't a press.
+ void PrimeEdges(const OSContPad* pads) {
+     for (int port = 0; port < MAXCONTROLLERS; port++) {
+         ReadEdge(port, pads[port]);
+     }
+-    sPrimeEdges = false;
+ }
+ 
+ // ---- the character screen's players (stock screen, up to 8 cursors) ----
+@@ -386,6 +382,9 @@ bool UniqueCharacters() {
+ }
+ 
+ void ChooseResult(int option) {
++    if (!sResults.active || sResults.lockFrames > 0) {
++        return; // not yet: the race has only just ended
++    }
+     sPendingResult = std::clamp(option, 0, kNumResultOptions - 1);
+     sPending = Pending::Result;
+ }
+@@ -530,7 +529,9 @@ extern "C" void couch_filter_pads(OSContPad* pads) {
+         }
+     }
+     if (sResults.active) {
+-        if (sPrimeEdges) {
++        // Counted in game frames here, so every LAN PC unlocks on the same frame.
++        if (sResults.lockFrames > 0) {
++            sResults.lockFrames--;
+             PrimeEdges(pads);
+         } else {
+             ResultsInput(pads);
+@@ -721,6 +722,7 @@ extern "C" void couch_on_race_over(void) {
+     if (!r.order.empty()) {
+         sWins[r.order[0].player]++;
+     }
++    r.lockFrames = kResultsLockFrames;
+     sResults = r;
+     ClearEdges();
+     GameUI::ShowCouchResults(true);
+diff --git a/src/port/couch/CouchParty.h b/src/port/couch/CouchParty.h
+index 3517b9ffd..5f8965c01 100644
+--- a/src/port/couch/CouchParty.h
++++ b/src/port/couch/CouchParty.h
+@@ -23,8 +23,14 @@ struct Results {
+     bool battle = false;
+     std::vector<Standing> order; // 1st place first
+     int cursor = 0;
++    // Game frames left before the controllers (and the mouse) can pick an
++    // option, so presses from the end of the race don't choose "Race again".
++    int lockFrames = 0;
+ };
+ 
++// How long the results ignore input after they appear (game frames, ~1.5 s).
++constexpr int kResultsLockFrames = 45;
++
+ Results& GetResults();
+ // 1st places this session (reset when the couch party is left).
+ int Wins(int player);
+diff --git a/src/port/ui/CouchWindow.cpp b/src/port/ui/CouchWindow.cpp
+index bdefeaf01..44bf0fa3c 100644
+--- a/src/port/ui/CouchWindow.cpp
++++ b/src/port/ui/CouchWindow.cpp
+@@ -117,6 +117,10 @@ void CouchResultsWindow::DrawElement() {
+     ImGui::Spacing();
+     static const char* kOptions[Couch::kNumResultOptions] = { "Race again", "Change course", "Change drivers",
+                                                              "Quit to menu" };
++    const bool locked = r.lockFrames > 0;
++    if (locked) {
++        ImGui::BeginDisabled();
++    }
+     for (int i = 0; i < Couch::kNumResultOptions; i++) {
+         bool selected = i == r.cursor;
+         std::string label = std::string(selected ? "> " : "  ") + kOptions[i];
+@@ -125,7 +129,12 @@ void CouchResultsWindow::DrawElement() {
+             Couch::ChooseResult(i);
+         }
+     }
+-    ImGui::TextColored(kGrey, "Up/Down and A on any player's controller.");
++    if (locked) {
++        ImGui::EndDisabled();
++        ImGui::TextColored(kGrey, "Get ready...");
++    } else {
++        ImGui::TextColored(kGrey, "Up/Down and A on any player's controller.");
++    }
+ }
+ 
+ } // namespace GameUI
+-- 
+2.43.0
+

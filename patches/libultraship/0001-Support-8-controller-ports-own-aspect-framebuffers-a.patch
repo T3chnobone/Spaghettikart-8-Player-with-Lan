@@ -1,0 +1,357 @@
+From 3a50a0a57eb69e91c4d3ce4b2a0952f7d0a5ae1e Mon Sep 17 00:00:00 2001
+From: T3chnobone <98963290+T3chnobone@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 14:21:24 +0000
+Subject: [PATCH] Support 8 controller ports, own-aspect framebuffers and
+ spanning windows
+
+- MAXCONTROLLERS 4 -> 8 (input editor shows all ports; new gamepads are
+  ignored on ports 2-8 until assigned).
+- Framebuffers with an explicit pixel size and their own aspect ratio
+  (gfx_set_framebuffer_pixel_size), for split views of any shape.
+- Window API: GetMonitorRects() and SetBorderless(), implemented for the
+  SDL2 and DXGI backends, for a window spanning several monitors.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Qq7B1uqfWVWykYRDDMiuXa
+---
+ include/fast/Fast3dWindow.h                   |  2 ++
+ include/fast/backends/gfx_dxgi.h              |  3 ++
+ include/fast/backends/gfx_sdl.h               |  2 ++
+ .../fast/backends/gfx_window_manager_api.h    |  8 +++++
+ include/fast/interpreter.h                    |  9 +++++-
+ include/libultraship/libultra/os.h            |  3 +-
+ include/ship/window/Window.h                  | 15 ++++++++++
+ src/fast/Fast3dWindow.cpp                     |  8 +++++
+ src/fast/backends/gfx_dxgi.cpp                | 20 ++++++++++++-
+ src/fast/backends/gfx_sdl2.cpp                | 21 ++++++++++++++
+ src/fast/interpreter.cpp                      | 29 +++++++++++++++++--
+ .../window/gui/InputEditorWindow.cpp          |  2 +-
+ .../ConnectedPhysicalDeviceManager.cpp        |  5 +++-
+ 13 files changed, 119 insertions(+), 8 deletions(-)
+
+diff --git a/include/fast/Fast3dWindow.h b/include/fast/Fast3dWindow.h
+index 7c16ca1..6021e78 100644
+--- a/include/fast/Fast3dWindow.h
++++ b/include/fast/Fast3dWindow.h
+@@ -71,6 +71,8 @@ class Fast3dWindow : public Ship::Window {
+     void SetCurrentDimensions(bool isFullscreen, uint32_t width, uint32_t height) override;
+     void SetCurrentDimensions(bool isFullscreen, uint32_t width, uint32_t height, int32_t posX, int32_t posY) override;
+     Ship::WindowRect GetPrimaryMonitorRect() override;
++    std::vector<Ship::WindowRect> GetMonitorRects() override;
++    void SetBorderless(bool borderless) override;
+ 
+     void InitWindowManager();
+     int32_t GetTargetFps();
+diff --git a/include/fast/backends/gfx_dxgi.h b/include/fast/backends/gfx_dxgi.h
+index 2be987d..ee6c706 100644
+--- a/include/fast/backends/gfx_dxgi.h
++++ b/include/fast/backends/gfx_dxgi.h
+@@ -35,6 +35,8 @@ class GfxWindowBackendDXGI final : public GfxWindowBackend {
+     void GetDimensions(uint32_t* width, uint32_t* height, int32_t* posX, int32_t* posY) override;
+     void SetDimensions(uint32_t width, uint32_t height, int32_t posX, int32_t posY) override;
+     Ship::WindowRect GetPrimaryMonitorRect() override;
++    std::vector<Ship::WindowRect> GetMonitorRects() override;
++    void SetBorderless(bool borderless) override;
+     void HandleEvents() override;
+     bool IsFrameReady() override;
+     void SwapBuffersBegin() override;
+@@ -67,6 +69,7 @@ class GfxWindowBackendDXGI final : public GfxWindowBackend {
+     uint32_t current_width, current_height;    // Width and height of client areas
+     std::vector<std::tuple<HMONITOR, RECT, BOOL>> monitor_list;
+     int32_t mPosX, mPosY; // Screen coordinates
++    bool mBorderless = false;
+     double mDetectedHz;
+     double mDisplayPeriod; // (1000 / dxgi.mDetectedHz) in ms
+     void (*mOnAllKeysUp)(void);
+diff --git a/include/fast/backends/gfx_sdl.h b/include/fast/backends/gfx_sdl.h
+index 79042f4..b38bed7 100644
+--- a/include/fast/backends/gfx_sdl.h
++++ b/include/fast/backends/gfx_sdl.h
+@@ -27,6 +27,8 @@ class GfxWindowBackendSDL2 final : public GfxWindowBackend {
+     void GetDimensions(uint32_t* width, uint32_t* height, int32_t* posX, int32_t* posY) override;
+     void SetDimensions(uint32_t width, uint32_t height, int32_t posX, int32_t posY) override;
+     Ship::WindowRect GetPrimaryMonitorRect() override;
++    std::vector<Ship::WindowRect> GetMonitorRects() override;
++    void SetBorderless(bool borderless) override;
+     void HandleEvents() override;
+     bool IsFrameReady() override;
+     void SwapBuffersBegin() override;
+diff --git a/include/fast/backends/gfx_window_manager_api.h b/include/fast/backends/gfx_window_manager_api.h
+index 3759991..9fdf480 100644
+--- a/include/fast/backends/gfx_window_manager_api.h
++++ b/include/fast/backends/gfx_window_manager_api.h
+@@ -2,6 +2,7 @@
+ 
+ #include <stdint.h>
+ #include <stdbool.h>
++#include <vector>
+ #include "ship/window/Window.h"
+ namespace Fast {
+ class GfxWindowBackend {
+@@ -27,6 +28,13 @@ class GfxWindowBackend {
+     virtual void GetDimensions(uint32_t* width, uint32_t* height, int32_t* posX, int32_t* posY) = 0;
+     virtual void SetDimensions(uint32_t width, uint32_t height, int32_t posX, int32_t posY) = 0;
+     virtual Ship::WindowRect GetPrimaryMonitorRect() = 0;
++    // All monitors in virtual desktop coordinates (default: primary only).
++    virtual std::vector<Ship::WindowRect> GetMonitorRects() {
++        return { GetPrimaryMonitorRect() };
++    }
++    // Window frame on/off (default: unsupported, no-op).
++    virtual void SetBorderless(bool borderless) {
++    }
+     virtual void HandleEvents() = 0;
+     virtual bool IsFrameReady() = 0;
+     virtual void SwapBuffersBegin() = 0;
+diff --git a/include/fast/interpreter.h b/include/fast/interpreter.h
+index 5d87f4e..6cf6021 100644
+--- a/include/fast/interpreter.h
++++ b/include/fast/interpreter.h
+@@ -363,6 +363,10 @@ struct FBInfo {
+     uint32_t native_width, native_height;   // Max "native" size of the screen, used for up-scaling
+     bool resize;                            // Scale to match the viewport
+     bool forceFixedAspect;                  // Preserve aspect ratio even if resize is true
++    // Fixed pixel size chosen by the game (e.g. one split-screen view). Uses the
++    // native coordinate space, scaled to the pixel size, with widescreen
++    // adjustment for its own aspect ratio rather than the window's.
++    bool ownAspect = false;
+ };
+ 
+ struct MaskedTextureEntry {
+@@ -395,6 +399,7 @@ class Interpreter {
+     int CreateFrameBuffer(uint32_t width, uint32_t height, uint32_t native_width, uint32_t native_height,
+                           uint8_t resize, bool forceFixedAspect = false);
+     void SetFrameBuffer(int fb, float noiseScale);
++    void SetFrameBufferPixelSize(int fb, uint32_t width, uint32_t height);
+     void CopyFrameBuffer(int fb_dst_id, int fb_src_id, bool copyOnce, bool* hasCopiedPtr);
+     void ResetFrameBuffer();
+     void AdjustPixelDepthCoordinates(float& x, float& y);
+@@ -566,4 +571,6 @@ const char* GfxGetOpcodeName(int8_t opcode);
+ extern "C" void gfx_texture_cache_clear();
+ extern "C" void gfx_shader_cache_clear();
+ extern "C" int gfx_create_framebuffer(uint32_t width, uint32_t height, uint32_t native_width, uint32_t native_height,
+-                                      uint8_t resize, bool forceFixedAspect = false);
+\ No newline at end of file
++                                      uint8_t resize, bool forceFixedAspect = false);
++// Give a framebuffer an explicit pixel size with its own aspect ratio (see FBInfo::ownAspect).
++extern "C" void gfx_set_framebuffer_pixel_size(int fb, uint32_t width, uint32_t height);
+\ No newline at end of file
+diff --git a/include/libultraship/libultra/os.h b/include/libultraship/libultra/os.h
+index bd11553..865fb59 100644
+--- a/include/libultraship/libultra/os.h
++++ b/include/libultraship/libultra/os.h
+@@ -11,7 +11,8 @@
+ #include "vi.h"
+ 
+ #ifndef _HW_VERSION_1
+-#define MAXCONTROLLERS 4
++// 4 on real hardware; 8 here so ports can host up to 8 local players.
++#define MAXCONTROLLERS 8
+ #else
+ #define MAXCONTROLLERS 6
+ #endif
+diff --git a/include/ship/window/Window.h b/include/ship/window/Window.h
+index 66a2b26..84d201d 100644
+--- a/include/ship/window/Window.h
++++ b/include/ship/window/Window.h
+@@ -198,6 +198,21 @@ class Window {
+      */
+     virtual WindowRect GetPrimaryMonitorRect() = 0;
+ 
++    /**
++     * @brief Returns the desktop rectangles of every connected monitor, in virtual
++     * desktop coordinates. Defaults to just the primary monitor.
++     */
++    virtual std::vector<WindowRect> GetMonitorRects() {
++        return { GetPrimaryMonitorRect() };
++    }
++
++    /**
++     * @brief Shows or hides the window frame (title bar and borders), e.g. for a
++     * window that spans several monitors. No-op on backends without support.
++     */
++    virtual void SetBorderless(bool borderless) {
++    }
++
+     /** @brief Returns the current graphics backend identifier.
+      *
+      * See the window backend ID convention in the comment above this class:
+diff --git a/src/fast/Fast3dWindow.cpp b/src/fast/Fast3dWindow.cpp
+index 2b77a5f..6413f93 100644
+--- a/src/fast/Fast3dWindow.cpp
++++ b/src/fast/Fast3dWindow.cpp
+@@ -440,6 +440,14 @@ Ship::WindowRect Fast3dWindow::GetPrimaryMonitorRect() {
+     return mWindowManagerApi->GetPrimaryMonitorRect();
+ }
+ 
++std::vector<Ship::WindowRect> Fast3dWindow::GetMonitorRects() {
++    return mWindowManagerApi->GetMonitorRects();
++}
++
++void Fast3dWindow::SetBorderless(bool borderless) {
++    mWindowManagerApi->SetBorderless(borderless);
++}
++
+ std::shared_ptr<GfxDebugger> Fast3dWindow::GetGfxDebugger() const {
+     return mGfxDebugger;
+ }
+diff --git a/src/fast/backends/gfx_dxgi.cpp b/src/fast/backends/gfx_dxgi.cpp
+index 09c04da..ea2b1be 100644
+--- a/src/fast/backends/gfx_dxgi.cpp
++++ b/src/fast/backends/gfx_dxgi.cpp
+@@ -752,12 +752,30 @@ void GfxWindowBackendDXGI::SetDimensions(uint32_t width, uint32_t height, int32_
+         RECT wr = { mPosX, mPosY, mPosX + static_cast<int32_t>(current_width),
+                     mPosY + static_cast<int32_t>(current_height) };
+         if (!mFullScreen) {
+-            AdjustWindowRect(&wr, WS_OVERLAPPEDWINDOW, FALSE);
++            if (!mBorderless) {
++                AdjustWindowRect(&wr, WS_OVERLAPPEDWINDOW, FALSE);
++            }
+             SetWindowPos(h_wnd, nullptr, wr.left, wr.top, wr.right - wr.left, wr.bottom - wr.top, SWP_FRAMECHANGED);
+         }
+     }
+ }
+ 
++std::vector<Ship::WindowRect> GfxWindowBackendDXGI::GetMonitorRects() {
++    std::vector<Ship::WindowRect> rects;
++    for (const auto& [hmon, rect, isPrimary] : GetMonitorList()) {
++        rects.push_back({ rect.left, rect.top, rect.right, rect.bottom });
++    }
++    return rects;
++}
++
++void GfxWindowBackendDXGI::SetBorderless(bool borderless) {
++    mBorderless = borderless;
++    if (h_wnd && !mFullScreen) {
++        SetWindowLongPtr(h_wnd, GWL_STYLE, (borderless ? WS_POPUP : WS_OVERLAPPEDWINDOW) | WS_VISIBLE);
++        SetWindowPos(h_wnd, nullptr, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER);
++    }
++}
++
+ Ship::WindowRect GfxWindowBackendDXGI::GetPrimaryMonitorRect() {
+     auto monitors = GetMonitorList();
+     for (const auto& [hmon, rect, isPrimary] : monitors) {
+diff --git a/src/fast/backends/gfx_sdl2.cpp b/src/fast/backends/gfx_sdl2.cpp
+index 15c5415..0a7b388 100644
+--- a/src/fast/backends/gfx_sdl2.cpp
++++ b/src/fast/backends/gfx_sdl2.cpp
+@@ -542,6 +542,27 @@ void GfxWindowBackendSDL2::SetDimensions(uint32_t width, uint32_t height, int32_
+     }
+ }
+ 
++std::vector<Ship::WindowRect> GfxWindowBackendSDL2::GetMonitorRects() {
++    std::vector<Ship::WindowRect> rects;
++    int count = SDL_GetNumVideoDisplays();
++    for (int i = 0; i < count; i++) {
++        SDL_Rect r;
++        if (SDL_GetDisplayBounds(i, &r) == 0) {
++            rects.push_back({ r.x, r.y, r.x + r.w, r.y + r.h });
++        }
++    }
++    if (rects.empty()) {
++        rects.push_back(GetPrimaryMonitorRect());
++    }
++    return rects;
++}
++
++void GfxWindowBackendSDL2::SetBorderless(bool borderless) {
++    if (mWnd) {
++        SDL_SetWindowBordered(mWnd, borderless ? SDL_FALSE : SDL_TRUE);
++    }
++}
++
+ Ship::WindowRect GfxWindowBackendSDL2::GetPrimaryMonitorRect() {
+     SDL_DisplayMode mode;
+     int display_in_use = mWnd ? SDL_GetWindowDisplayIndex(mWnd) : 0;
+diff --git a/src/fast/interpreter.cpp b/src/fast/interpreter.cpp
+index 04dff04..890d452 100644
+--- a/src/fast/interpreter.cpp
++++ b/src/fast/interpreter.cpp
+@@ -1529,8 +1529,11 @@ void Interpreter::GfxSpPopMatrix(uint32_t count) {
+ float Interpreter::AdjXForAspectRatio(float x) const {
+     // Skip widescreen adjustment for fixed-size off-screen FBs (HUD elements,
+     // small capture buffers), or those which specify a fixed aspect ratio.
+-    if (mFbActive && mActiveFrameBuffer != mFrameBuffers.end() &&
+-        (!mActiveFrameBuffer->second.resize || mActiveFrameBuffer->second.forceFixedAspect)) {
++    if (mFbActive && mActiveFrameBuffer != mFrameBuffers.end() && mActiveFrameBuffer->second.ownAspect) {
++        const auto& fb = mActiveFrameBuffer->second;
++        return x * (4.0f / 3.0f) / ((float)fb.applied_width / (float)fb.applied_height);
++    } else if (mFbActive && mActiveFrameBuffer != mFrameBuffers.end() &&
++               (!mActiveFrameBuffer->second.resize || mActiveFrameBuffer->second.forceFixedAspect)) {
+         return x;
+     } else {
+         return x * (4.0f / 3.0f) / ((float)mCurDimensions.width / (float)mCurDimensions.height);
+@@ -2286,7 +2289,7 @@ void Interpreter::AdjustVIewportOrScissor(XYWidthHeight* area) {
+     } else {
+         area->y = mActiveFrameBuffer->second.orig_height - area->y;
+ 
+-        if (mActiveFrameBuffer->second.resize) {
++        if (mActiveFrameBuffer->second.resize || mActiveFrameBuffer->second.ownAspect) {
+             area->width *= RATIO_X(mActiveFrameBuffer, mCurDimensions);
+             area->height *= RATIO_Y(mActiveFrameBuffer, mCurDimensions);
+             area->x *= RATIO_X(mActiveFrameBuffer, mCurDimensions);
+@@ -5199,6 +5202,22 @@ int Interpreter::CreateFrameBuffer(uint32_t width, uint32_t height, uint32_t nat
+     return fb;
+ }
+ 
++void Interpreter::SetFrameBufferPixelSize(int fb, uint32_t width, uint32_t height) {
++    auto it = mFrameBuffers.find(fb);
++    if (it == mFrameBuffers.end()) {
++        return;
++    }
++    width = width == 0 ? 1 : width;
++    height = height == 0 ? 1 : height;
++    it->second.resize = false;
++    it->second.ownAspect = true;
++    if (width != it->second.applied_width || height != it->second.applied_height) {
++        mRapi->UpdateFramebufferParameters(fb, width, height, 1, true, true, true, true);
++        it->second.applied_width = width;
++        it->second.applied_height = height;
++    }
++}
++
+ void Interpreter::SetFrameBuffer(int fb, float noiseScale) {
+     mRapi->StartDrawToFramebuffer(fb, noiseScale);
+     mRapi->ClearFramebuffer(false, true);
+@@ -5448,6 +5467,10 @@ extern "C" int gfx_create_framebuffer(uint32_t width, uint32_t height, uint32_t
+                                                            forceFixedAspect);
+ }
+ 
++extern "C" void gfx_set_framebuffer_pixel_size(int fb, uint32_t width, uint32_t height) {
++    Fast::mInstance.lock().get()->SetFrameBufferPixelSize(fb, width, height);
++}
++
+ extern "C" void gfx_texture_cache_clear() {
+     Fast::mInstance.lock().get()->TextureCacheClear();
+ }
+diff --git a/src/libultraship/window/gui/InputEditorWindow.cpp b/src/libultraship/window/gui/InputEditorWindow.cpp
+index 54948e1..4cb6855 100644
+--- a/src/libultraship/window/gui/InputEditorWindow.cpp
++++ b/src/libultraship/window/gui/InputEditorWindow.cpp
+@@ -1414,7 +1414,7 @@ void InputEditorWindow::DrawSetDefaultsButton(uint8_t portIndex) {
+ 
+ void InputEditorWindow::DrawElement() {
+     ImGui::BeginTabBar("##ControllerConfigPortTabs");
+-    for (uint8_t i = 0; i < 4; i++) {
++    for (uint8_t i = 0; i < MAXCONTROLLERS; i++) {
+         DrawPortTab(i);
+     }
+     ImGui::EndTabBar();
+diff --git a/src/ship/controller/physicaldevice/ConnectedPhysicalDeviceManager.cpp b/src/ship/controller/physicaldevice/ConnectedPhysicalDeviceManager.cpp
+index 7f0397e..b5c29ee 100644
+--- a/src/ship/controller/physicaldevice/ConnectedPhysicalDeviceManager.cpp
++++ b/src/ship/controller/physicaldevice/ConnectedPhysicalDeviceManager.cpp
+@@ -100,7 +100,10 @@ void ConnectedPhysicalDeviceManager::RefreshConnectedSDLGamepads() {
+         mConnectedSDLGamepads[instanceId] = gamepad;
+         mConnectedSDLGamepadNames[instanceId] = gamepadName;
+ 
+-        for (uint8_t port = 1; port < 4; port++) {
++        // New gamepads go to port 1 only; every other port ignores them until
++        // the user (or the game) assigns them. Covers games with up to 8 ports.
++        constexpr uint8_t kMaxPorts = 8;
++        for (uint8_t port = 1; port < kMaxPorts; port++) {
+             mIgnoredInstanceIds[port].insert(instanceId);
+         }
+     }
+-- 
+2.43.0
+

@@ -1,0 +1,152 @@
+From d5a8542a94d19a31e2e694fc4396e99459e7de90 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 30 Oct 2026 13:22:43 +0000
+Subject: [PATCH 17/17] Main menu 1P and 2P stay 1 and 2 players: remove the
+ 8-player Grand Prix
+
+More players: Couch Party or LAN GAME (VS/Battle).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Qq7B1uqfWVWykYRDDMiuXa
+---
+ docs/LOCAL_MULTIPLAYER.md        |  6 ++++++
+ docs/NETPLAY.md                  |  6 ++++++
+ src/port/localplay/localplay.cpp |  4 +++-
+ src/port/netplay/netrace.c       |  6 ++----
+ src/port/ui/LocalPlayWindow.cpp  | 10 ++++------
+ src/port/ui/NetplayWindow.cpp    | 13 +++++--------
+ 6 files changed, 26 insertions(+), 19 deletions(-)
+
+diff --git a/docs/LOCAL_MULTIPLAYER.md b/docs/LOCAL_MULTIPLAYER.md
+index 28544a8..93d01bd 100644
+--- a/docs/LOCAL_MULTIPLAYER.md
++++ b/docs/LOCAL_MULTIPLAYER.md
+@@ -1,5 +1,11 @@
+ # Local Multiplayer (up to 8 players) and Multiple Screens
+ 
++> **Note:** the 8-player Grand Prix has been removed. The main menu's 1P column
++> is always 1 player and 2P is 2 players. For more players use **COUCH PARTY**
++> (one PC) or **LAN GAME** (several PCs). The sections below on the Grand Prix
++> describe the earlier build.
++
++
+ Up to 8 people on one PC, each with their own view, on one screen or spread
+ over several monitors.
+ 
+diff --git a/docs/NETPLAY.md b/docs/NETPLAY.md
+index ac19d19..fd5509a 100644
+--- a/docs/NETPLAY.md
++++ b/docs/NETPLAY.md
+@@ -1,5 +1,11 @@
+ # LAN Netplay
+ 
++> **Note:** the 8-player Grand Prix has been removed. The main menu's 1P column
++> is always 1 player and 2P is 2 players. For more players use **COUCH PARTY**
++> (one PC) or **LAN GAME** (several PCs). The sections below on the Grand Prix
++> describe the earlier build.
++
++
+ Play SpaghettiKart with up to **8 people on separate PCs** over a local network.
+ 
+ ## LAN GAME (from the main menu)
+diff --git a/src/port/localplay/localplay.cpp b/src/port/localplay/localplay.cpp
+index 072ddb2..b301a8d 100644
+--- a/src/port/localplay/localplay.cpp
++++ b/src/port/localplay/localplay.cpp
+@@ -141,7 +141,9 @@ void AutoAssignPads() {
+ // ---- settings ----
+ 
+ bool Enabled() {
+-    return CVarGetInteger("gLocalPlay.Enabled", 0) != 0;
++    // The 8-player Grand Prix is gone: the menu's 1P column is always 1 player.
++    // (Couch Party has its own roster and doesn't use this.)
++    return false;
+ }
+ int PlayerCount() {
+     return std::clamp(CVarGetInteger("gLocalPlay.Players", 4), 2, NETRACE_MAX_HUMANS);
+diff --git a/src/port/netplay/netrace.c b/src/port/netplay/netrace.c
+index 0c2c51f..abb9c55 100644
+--- a/src/port/netplay/netrace.c
++++ b/src/port/netplay/netrace.c
+@@ -30,10 +30,8 @@ bool netrace_active(void) {
+         (gPlayerCountSelection1 != 1) || gDemoMode) {
+         return false;
+     }
+-    if (gModeSelection == GRAND_PRIX) {
+-        return true;
+-    }
+-    // Couch Party runs VS races and Battles the same way, all players local.
++    // The main menu's 1P column stays one player: no 8-player Grand Prix.
++    // Couch Party and LAN GAME run VS races and Battles this way.
+     return gCouchParty && gNetLocalViews && ((gModeSelection == VERSUS) || (gModeSelection == BATTLE));
+ }
+ 
+diff --git a/src/port/ui/LocalPlayWindow.cpp b/src/port/ui/LocalPlayWindow.cpp
+index f4d7a2e..64ae8d2 100644
+--- a/src/port/ui/LocalPlayWindow.cpp
++++ b/src/port/ui/LocalPlayWindow.cpp
+@@ -130,9 +130,8 @@ void LocalPlayWindow::DrawElement() {
+     }
+ 
+     // ---------------------------------------------------------------- players
+-    ImGui::SeparatorText("8-player Grand Prix");
+-    CheckboxCVar("Local multiplayer (up to 8 players)", "gLocalPlay.Enabled", false);
+-    ImGui::BeginDisabled(!LocalPlay::Enabled());
++    ImGui::SeparatorText("Extra players");
++    ImGui::BeginDisabled(true); // the menu's 1P and 2P columns stay 1 and 2 players
+     int players = LocalPlay::PlayerCount();
+     if (ImGui::SliderInt("Players", &players, 2, 8)) {
+         CVarSetInteger("gLocalPlay.Players", players);
+@@ -147,9 +146,8 @@ void LocalPlayWindow::DrawElement() {
+         }
+     }
+     ImGui::EndDisabled();
+-    Wrapped(kGrey, "Start a race with 1P > Mario GP. Player 1 picks their character in the menu; "
+-                   "players 2-8 drive the characters above, each with their own view. "
+-                   "Empty grid slots are CPU drivers.");
++    Wrapped(kGrey, "The main menu's first column is 1 player and the second is 2 players. "
++                   "For more players use COUCH PARTY (one PC) or LAN GAME (several PCs).");
+ 
+     // ------------------------------------------------------------ controllers
+     ImGui::SeparatorText("Controllers");
+diff --git a/src/port/ui/NetplayWindow.cpp b/src/port/ui/NetplayWindow.cpp
+index 3c572a9..e155aa7 100644
+--- a/src/port/ui/NetplayWindow.cpp
++++ b/src/port/ui/NetplayWindow.cpp
+@@ -19,7 +19,7 @@ char sAddress[64] = "";
+ int sPort = Netplay::kDefaultPort;
+ int sDelay = 2;
+ int sCharacter = 1;
+-int sSplitScreen = 0;
++int sSplitScreen = 1; // the menu's 1P/2P modes stay 1/2 players; 8 players: LAN GAME
+ 
+ const char* kCharacterNames[8] = { "Mario", "Luigi", "Yoshi", "Toad", "Donkey Kong", "Wario", "Peach", "Bowser" };
+ 
+@@ -155,12 +155,8 @@ void NetplayWindow::DrawElement() {
+             ImGui::Spacing();
+             if (s.GetRole() == Netplay::Role::Host) {
+                 ImGui::TextUnformatted("Match type");
+-                if (ImGui::RadioButton("Big race - own screen on every PC (up to 8)", sSplitScreen == 0)) {
+-                    sSplitScreen = 0;
+-                    s.SetLobbyOptions(0);
+-                }
+-                if (ImGui::RadioButton("Split-screen - classic couch view (up to 4)", sSplitScreen == 1)) {
+-                    sSplitScreen = 1;
++                ImGui::TextUnformatted("Match type: split-screen (up to 4)");
++                if (BigRace(s)) {
+                     s.SetLobbyOptions(Netplay::kOptionSplitScreen);
+                 }
+                 int delay = s.InputDelay();
+@@ -180,7 +176,8 @@ void NetplayWindow::DrawElement() {
+                 }
+                 ImGui::PushTextWrapPos(0.0f);
+                 if (tooMany) {
+-                    ImGui::TextColored(kRed, "Split-screen supports 4 players. Switch to Big race for %d.",
++                    ImGui::TextColored(kRed, "Split-screen supports 4 players. For up to 8, use LAN GAME "
++                                       "in the main menu (%d here now).",
+                                        s.PlayerCount());
+                 } else if (BigRace(s)) {
+                     ImGui::TextColored(kGrey,
+-- 
+2.43.0
+

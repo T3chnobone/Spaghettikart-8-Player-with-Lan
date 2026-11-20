@@ -1,0 +1,69 @@
+From 456d59e9e697b455417bb5a995a30324b409e29e Mon Sep 17 00:00:00 2001
+From: T3chnobone <98963290+T3chnobone@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 21:54:34 +0000
+Subject: [PATCH 04/17] Fix startup appearing frozen on Windows: keep message
+ boxes on top
+
+The "Found Mario Kart 64 / extraction will now begin" box (and other SDL
+message boxes shown before the main loop) could open hidden behind the
+not-yet-drawing game window, so the game looked frozen after picking the
+ROM while it was really waiting for OK. On Windows, use a plain Win32
+message box with MB_TOPMOST | MB_SETFOREGROUND for these and for the crash
+dialog.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Qq7B1uqfWVWykYRDDMiuXa
+---
+ src/port/Engine.cpp | 10 +++++++++-
+ src/port/Game.cpp   |  7 +------
+ 2 files changed, 10 insertions(+), 7 deletions(-)
+
+diff --git a/src/port/Engine.cpp b/src/port/Engine.cpp
+index d933f29..edf7ca7 100644
+--- a/src/port/Engine.cpp
++++ b/src/port/Engine.cpp
+@@ -317,6 +317,14 @@ extern "C" uint32_t GameEngine_GetInterpolationFrameCount() {
+ void GameEngine::ShowMessage(const char* title, const char* message, SDL_MessageBoxFlags type) {
+ #if defined(__SWITCH__)
+     SPDLOG_ERROR(message);
++#elif defined(_WIN32)
++    // A plain Win32 box, forced on top: SDL's box can open hidden behind the
++    // (not yet drawing) game window, which looks like a freeze at startup.
++    UINT icon = type == SDL_MESSAGEBOX_ERROR ? MB_ICONERROR
++                : type == SDL_MESSAGEBOX_WARNING ? MB_ICONWARNING
++                                                 : MB_ICONINFORMATION;
++    MessageBoxA(nullptr, message, title, MB_OK | icon | MB_TOPMOST | MB_SETFOREGROUND);
++    SPDLOG_ERROR(message);
+ #else
+     SDL_ShowSimpleMessageBox(type, title, message, nullptr);
+     SPDLOG_ERROR(message);
+@@ -326,7 +334,7 @@ void GameEngine::ShowMessage(const char* title, const char* message, SDL_Message
+ int GameEngine::ShowYesNoBox(const char* title, const char* box) {
+     int ret;
+ #ifdef _WIN32
+-    ret = MessageBoxA(nullptr, box, title, MB_YESNO | MB_ICONQUESTION);
++    ret = MessageBoxA(nullptr, box, title, MB_YESNO | MB_ICONQUESTION | MB_TOPMOST | MB_SETFOREGROUND);
+ #elif defined(__SWITCH__)
+     SPDLOG_ERROR(box);
+     return IDYES;
+diff --git a/src/port/Game.cpp b/src/port/Game.cpp
+index 2db4ca7..33adf28 100644
+--- a/src/port/Game.cpp
++++ b/src/port/Game.cpp
+@@ -1035,12 +1035,7 @@ void CM_ThrowRuntimeError(const char* fmt, ...) {
+ 
+     SPDLOG_ERROR(error_mesg);
+ 
+-    SDL_ShowSimpleMessageBox(
+-        SDL_MESSAGEBOX_ERROR,
+-        "You dropped your plate of Spaghetti!",
+-        error_mesg,
+-        NULL
+-    );
++    GameEngine::ShowMessage("You dropped your plate of Spaghetti!", error_mesg, SDL_MESSAGEBOX_ERROR);
+ 
+     exit(EXIT_FAILURE);
+ }
+-- 
+2.43.0
+

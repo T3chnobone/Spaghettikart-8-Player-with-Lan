@@ -1,0 +1,650 @@
+From 9196ebe9e783fd66227b0e9fdae239a334cb98c5 Mon Sep 17 00:00:00 2001
+From: T3chnobone <98963290+T3chnobone@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 08:52:36 +0000
+Subject: [PATCH] Couch Party / LAN: show every player's HUD, draw karts at any
+ distance
+
+- Lap counter, timer and speedometer: the 1P slide-in animation only moved
+  player 1's HUD. Every other view kept its starting positions, with the
+  lap counter off the left edge and the speedometer off the right. The
+  slide-in now runs for every human driver, and the speedometer needle
+  sits on each player's own dial.
+- Left-side HUD pictures (lap counter) moved only their left edge with the
+  screen edge. In a view narrower than 4:3, such as two players side by
+  side, the right edge ended up left of the left edge and the picture
+  vanished. Both edges now move together.
+- Karts: the stock draw distance (tuned for the N64) made karts vanish a
+  few hundred units ahead. In Couch Party and LAN races every kart is now
+  drawn at any distance.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Qq7B1sWVXKm11Pn2wqQeQQ
+---
+ src/code_80057C60.c  | 316 +++++++++++++++++++++++--------------------
+ src/render_objects.c |  13 +-
+ src/render_player.c  |   8 ++
+ 3 files changed, 185 insertions(+), 152 deletions(-)
+
+diff --git a/src/code_80057C60.c b/src/code_80057C60.c
+index 9486378a9..e05f24bd3 100644
+--- a/src/code_80057C60.c
++++ b/src/code_80057C60.c
+@@ -1470,364 +1470,377 @@ void func_8005AB20(void) {
+     }
+ }
+ 
+-void func_8005AB60(void) {
+-    switch (playerHUD[PLAYER_ONE].unk_78) {
++// Slides the 1P HUD (speedometer, timer, lap counter, lap times) into place.
++// Run for every human driver in a Couch Party / LAN race, whose views all use
++// this layout; otherwise their lap counter stays off the left edge of the view.
++static void hud_intro_step(s32 id) {
++    switch (playerHUD[id].unk_78) {
+         case 0:
+             break;
+         case 1:
+-            s16_step_towards(&playerHUD[PLAYER_ONE].speedometerX, 0x106, 0x10);
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].speedometerY, 0xB6, 0x10) != 0) {
+-                playerHUD[PLAYER_ONE].unk_78++;
+-                playerHUD[PLAYER_ONE].unk_79 = 1;
++            s16_step_towards(&playerHUD[id].speedometerX, 0x106, 0x10);
++            if (s16_step_towards(&playerHUD[id].speedometerY, 0xB6, 0x10) != 0) {
++                playerHUD[id].unk_78++;
++                playerHUD[id].unk_79 = 1;
+             }
+             break;
+         case 2:
+-            s16_step_towards(&playerHUD[PLAYER_ONE].speedometerX, 0x116, 4);
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].speedometerY, 0xC6, 4) != 0) {
+-                playerHUD[PLAYER_ONE].unk_78++;
++            s16_step_towards(&playerHUD[id].speedometerX, 0x116, 4);
++            if (s16_step_towards(&playerHUD[id].speedometerY, 0xC6, 4) != 0) {
++                playerHUD[id].unk_78++;
+             }
+             break;
+         case 3:
+-            s16_step_towards(&playerHUD[PLAYER_ONE].speedometerX, 0x106, 4);
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].speedometerY, 0xB6, 4) != 0) {
+-                playerHUD[PLAYER_ONE].unk_78++;
++            s16_step_towards(&playerHUD[id].speedometerX, 0x106, 4);
++            if (s16_step_towards(&playerHUD[id].speedometerY, 0xB6, 4) != 0) {
++                playerHUD[id].unk_78++;
+             }
+             break;
+         case 4:
+-            s16_step_towards(&playerHUD[PLAYER_ONE].speedometerX, 0x10E, 4);
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].speedometerY, 0xBE, 4) != 0) {
+-                playerHUD[PLAYER_ONE].unk_78++;
++            s16_step_towards(&playerHUD[id].speedometerX, 0x10E, 4);
++            if (s16_step_towards(&playerHUD[id].speedometerY, 0xBE, 4) != 0) {
++                playerHUD[id].unk_78++;
+             }
+             break;
+         case 5:
+-            s16_step_towards(&playerHUD[PLAYER_ONE].speedometerX, 0x106, 4);
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].speedometerY, 0xB6, 4) != 0) {
+-                playerHUD[PLAYER_ONE].unk_78++;
++            s16_step_towards(&playerHUD[id].speedometerX, 0x106, 4);
++            if (s16_step_towards(&playerHUD[id].speedometerY, 0xB6, 4) != 0) {
++                playerHUD[id].unk_78++;
+             }
+             break;
+         case 6:
+-            s16_step_towards(&playerHUD[PLAYER_ONE].speedometerX, 0x10A, 2);
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].speedometerY, 0xBA, 2) != 0) {
+-                playerHUD[PLAYER_ONE].unk_78++;
++            s16_step_towards(&playerHUD[id].speedometerX, 0x10A, 2);
++            if (s16_step_towards(&playerHUD[id].speedometerY, 0xBA, 2) != 0) {
++                playerHUD[id].unk_78++;
+             }
+             break;
+         case 7:
+-            s16_step_towards(&playerHUD[PLAYER_ONE].speedometerX, 0x106, 2);
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].speedometerY, 0xB6, 2) != 0) {
+-                playerHUD[PLAYER_ONE].unk_78++;
++            s16_step_towards(&playerHUD[id].speedometerX, 0x106, 2);
++            if (s16_step_towards(&playerHUD[id].speedometerY, 0xB6, 2) != 0) {
++                playerHUD[id].unk_78++;
+             }
+             break;
+         case 8:
+-            playerHUD[PLAYER_ONE].unk_78 = 0;
++            playerHUD[id].unk_78 = 0;
+             break;
+     }
+-    if ((playerHUD[PLAYER_ONE].unk_79 != 0) && (playerHUD[PLAYER_ONE].unk_79 == 1)) {
++    if ((id == PLAYER_ONE) && (playerHUD[id].unk_79 != 0) && (playerHUD[id].unk_79 == 1)) {
+         if (++D_801657E7 >= 0x10) {
+             D_801657E7 = 0;
+             D_8016579E = 0xDD00;
+-            playerHUD[PLAYER_ONE].unk_79 = 0U;
++            playerHUD[id].unk_79 = 0U;
+         } else {
+             D_8016579E = D_800E55B0[D_801657E7] + 0xDD00;
+         }
+     }
+-    switch (playerHUD[PLAYER_ONE].unk_80) {
++    switch (playerHUD[id].unk_80) {
+         case 0:
+             break;
+         case 1:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].slideItemBoxY, 0x40, 8) != 0) {
+-                playerHUD[PLAYER_ONE].unk_80++;
++            if (s16_step_towards(&playerHUD[id].slideItemBoxY, 0x40, 8) != 0) {
++                playerHUD[id].unk_80++;
+             }
+             break;
+         case 2:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].slideItemBoxY, 0x38, 8) != 0) {
+-                playerHUD[PLAYER_ONE].unk_80++;
++            if (s16_step_towards(&playerHUD[id].slideItemBoxY, 0x38, 8) != 0) {
++                playerHUD[id].unk_80++;
+             }
+             break;
+         case 3:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].slideItemBoxY, 0x40, 8) != 0) {
+-                playerHUD[PLAYER_ONE].unk_80++;
++            if (s16_step_towards(&playerHUD[id].slideItemBoxY, 0x40, 8) != 0) {
++                playerHUD[id].unk_80++;
+             }
+             break;
+         case 4:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].slideItemBoxY, 0x38, 8) != 0) {
+-                playerHUD[PLAYER_ONE].unk_80++;
++            if (s16_step_towards(&playerHUD[id].slideItemBoxY, 0x38, 8) != 0) {
++                playerHUD[id].unk_80++;
+             }
+             break;
+         case 5:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].slideItemBoxY, 0x40, 8) != 0) {
+-                playerHUD[PLAYER_ONE].unk_80++;
++            if (s16_step_towards(&playerHUD[id].slideItemBoxY, 0x40, 8) != 0) {
++                playerHUD[id].unk_80++;
+             }
+             break;
+         case 6:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].slideItemBoxY, 0x38, 4) != 0) {
+-                playerHUD[PLAYER_ONE].unk_80++;
++            if (s16_step_towards(&playerHUD[id].slideItemBoxY, 0x38, 4) != 0) {
++                playerHUD[id].unk_80++;
+             }
+             break;
+         case 7:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].slideItemBoxY, 0x40, 4) != 0) {
+-                playerHUD[PLAYER_ONE].unk_80++;
++            if (s16_step_towards(&playerHUD[id].slideItemBoxY, 0x40, 4) != 0) {
++                playerHUD[id].unk_80++;
+             }
+             break;
+         case 8:
+-            playerHUD[PLAYER_ONE].unk_80 = 0;
++            playerHUD[id].unk_80 = 0;
+             break;
+     }
+-    switch (playerHUD[PLAYER_ONE].unk_7A) {
++    switch (playerHUD[id].unk_7A) {
+         case 0:
+             break;
+         case 1:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].timerX, 0xE4, 0x10) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7A++;
++            if (s16_step_towards(&playerHUD[id].timerX, 0xE4, 0x10) != 0) {
++                playerHUD[id].unk_7A++;
+             }
+             break;
+         case 2:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].timerX, 0xF4, 4) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7A++;
++            if (s16_step_towards(&playerHUD[id].timerX, 0xF4, 4) != 0) {
++                playerHUD[id].unk_7A++;
+             }
+             break;
+         case 3:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].timerX, 0xE4, 4) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7A++;
++            if (s16_step_towards(&playerHUD[id].timerX, 0xE4, 4) != 0) {
++                playerHUD[id].unk_7A++;
+             }
+             break;
+         case 4:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].timerX, 0xEC, 4) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7A++;
++            if (s16_step_towards(&playerHUD[id].timerX, 0xEC, 4) != 0) {
++                playerHUD[id].unk_7A++;
+             }
+             break;
+         case 5:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].timerX, 0xE4, 4) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7A++;
++            if (s16_step_towards(&playerHUD[id].timerX, 0xE4, 4) != 0) {
++                playerHUD[id].unk_7A++;
+             }
+             break;
+         case 6:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].timerX, 0xE8, 2) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7A++;
++            if (s16_step_towards(&playerHUD[id].timerX, 0xE8, 2) != 0) {
++                playerHUD[id].unk_7A++;
+             }
+             break;
+         case 7:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].timerX, 0xE4, 2) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7A++;
++            if (s16_step_towards(&playerHUD[id].timerX, 0xE4, 2) != 0) {
++                playerHUD[id].unk_7A++;
+             }
+             break;
+         case 8:
+-            playerHUD[PLAYER_ONE].unk_7A = 0;
++            playerHUD[id].unk_7A = 0;
+             break;
+     }
+-    switch (playerHUD[PLAYER_ONE].unk_7D) {
++    switch (playerHUD[id].unk_7D) {
+         case 0:
+             break;
+         case 1:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].lapX, 0x53, 0x10) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7D++;
++            if (s16_step_towards(&playerHUD[id].lapX, 0x53, 0x10) != 0) {
++                playerHUD[id].unk_7D++;
+             }
+             break;
+         case 2:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].lapX, 0x43, 4) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7D++;
++            if (s16_step_towards(&playerHUD[id].lapX, 0x43, 4) != 0) {
++                playerHUD[id].unk_7D++;
+             }
+             break;
+         case 3:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].lapX, 0x53, 4) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7D++;
++            if (s16_step_towards(&playerHUD[id].lapX, 0x53, 4) != 0) {
++                playerHUD[id].unk_7D++;
+             }
+             break;
+         case 4:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].lapX, 0x4B, 4) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7D++;
++            if (s16_step_towards(&playerHUD[id].lapX, 0x4B, 4) != 0) {
++                playerHUD[id].unk_7D++;
+             }
+             break;
+         case 5:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].lapX, 0x53, 4) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7D++;
++            if (s16_step_towards(&playerHUD[id].lapX, 0x53, 4) != 0) {
++                playerHUD[id].unk_7D++;
+             }
+             break;
+         case 6:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].lapX, 0x4F, 2) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7D++;
++            if (s16_step_towards(&playerHUD[id].lapX, 0x4F, 2) != 0) {
++                playerHUD[id].unk_7D++;
+             }
+             break;
+         case 7:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].lapX, 0x53, 2) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7D++;
++            if (s16_step_towards(&playerHUD[id].lapX, 0x53, 2) != 0) {
++                playerHUD[id].unk_7D++;
+             }
+             break;
+         case 8:
+-            playerHUD[PLAYER_ONE].unk_7D = 0;
++            playerHUD[id].unk_7D = 0;
+             break;
+     }
+-    D_8018CFEC = (f32) (playerHUD[PLAYER_ONE].speedometerX + 0x18);
+-    D_8018CFF4 = (f32) (playerHUD[PLAYER_ONE].speedometerY + 6);
+-    switch (playerHUD[PLAYER_ONE].unk_7B) {
++    if (id == PLAYER_ONE) {
++        D_8018CFEC = (f32) (playerHUD[id].speedometerX + 0x18);
++        D_8018CFF4 = (f32) (playerHUD[id].speedometerY + 6);
++    }
++    switch (playerHUD[id].unk_7B) {
+         case 0:
+             break;
+         case 1:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].lap1CompletionTimeX, 0xE4, 0x10) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7B++;
++            if (s16_step_towards(&playerHUD[id].lap1CompletionTimeX, 0xE4, 0x10) != 0) {
++                playerHUD[id].unk_7B++;
+             }
+             break;
+         case 2:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].lap1CompletionTimeX, 0xF4, 4) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7B++;
++            if (s16_step_towards(&playerHUD[id].lap1CompletionTimeX, 0xF4, 4) != 0) {
++                playerHUD[id].unk_7B++;
+             }
+             break;
+         case 3:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].lap1CompletionTimeX, 0xE4, 4) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7B++;
++            if (s16_step_towards(&playerHUD[id].lap1CompletionTimeX, 0xE4, 4) != 0) {
++                playerHUD[id].unk_7B++;
+             }
+             break;
+         case 4:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].lap1CompletionTimeX, 0xEC, 4) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7B++;
++            if (s16_step_towards(&playerHUD[id].lap1CompletionTimeX, 0xEC, 4) != 0) {
++                playerHUD[id].unk_7B++;
+             }
+             break;
+         case 5:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].lap1CompletionTimeX, 0xE4, 4) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7B++;
++            if (s16_step_towards(&playerHUD[id].lap1CompletionTimeX, 0xE4, 4) != 0) {
++                playerHUD[id].unk_7B++;
+             }
+             break;
+         case 6:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].lap1CompletionTimeX, 0xE8, 2) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7B++;
++            if (s16_step_towards(&playerHUD[id].lap1CompletionTimeX, 0xE8, 2) != 0) {
++                playerHUD[id].unk_7B++;
+             }
+             break;
+         case 7:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].lap1CompletionTimeX, 0xE4, 2) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7B++;
++            if (s16_step_towards(&playerHUD[id].lap1CompletionTimeX, 0xE4, 2) != 0) {
++                playerHUD[id].unk_7B++;
+             }
+             break;
+         case 8:
+-            playerHUD[PLAYER_ONE].unk_7B = 0;
++            playerHUD[id].unk_7B = 0;
+             break;
+     }
+-    switch (playerHUD[PLAYER_ONE].unk_7E) {
++    switch (playerHUD[id].unk_7E) {
+         case 0:
+             break;
+         case 1:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].lapAfterImage1X, 0x53, 0x10) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7E++;
++            if (s16_step_towards(&playerHUD[id].lapAfterImage1X, 0x53, 0x10) != 0) {
++                playerHUD[id].unk_7E++;
+             }
+             break;
+         case 2:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].lapAfterImage1X, 0x43, 4) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7E++;
++            if (s16_step_towards(&playerHUD[id].lapAfterImage1X, 0x43, 4) != 0) {
++                playerHUD[id].unk_7E++;
+             }
+             break;
+         case 3:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].lapAfterImage1X, 0x53, 4) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7E++;
++            if (s16_step_towards(&playerHUD[id].lapAfterImage1X, 0x53, 4) != 0) {
++                playerHUD[id].unk_7E++;
+             }
+             break;
+         case 4:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].lapAfterImage1X, 0x4B, 4) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7E++;
++            if (s16_step_towards(&playerHUD[id].lapAfterImage1X, 0x4B, 4) != 0) {
++                playerHUD[id].unk_7E++;
+             }
+             break;
+         case 5:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].lapAfterImage1X, 0x53, 4) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7E++;
++            if (s16_step_towards(&playerHUD[id].lapAfterImage1X, 0x53, 4) != 0) {
++                playerHUD[id].unk_7E++;
+             }
+             break;
+         case 6:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].lapAfterImage1X, 0x4F, 2) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7E++;
++            if (s16_step_towards(&playerHUD[id].lapAfterImage1X, 0x4F, 2) != 0) {
++                playerHUD[id].unk_7E++;
+             }
+             break;
+         case 7:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].lapAfterImage1X, 0x53, 2) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7E++;
++            if (s16_step_towards(&playerHUD[id].lapAfterImage1X, 0x53, 2) != 0) {
++                playerHUD[id].unk_7E++;
+             }
+             break;
+         case 8:
+-            playerHUD[PLAYER_ONE].unk_7E = 0;
++            playerHUD[id].unk_7E = 0;
+             break;
+     }
+-    switch (playerHUD[PLAYER_ONE].unk_7C) {
++    switch (playerHUD[id].unk_7C) {
+         case 0:
+             break;
+         case 1:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].lap2CompletionTimeX, 0xE4, 0x10) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7C++;
++            if (s16_step_towards(&playerHUD[id].lap2CompletionTimeX, 0xE4, 0x10) != 0) {
++                playerHUD[id].unk_7C++;
+             }
+             break;
+         case 2:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].lap2CompletionTimeX, 0xF4, 4) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7C++;
++            if (s16_step_towards(&playerHUD[id].lap2CompletionTimeX, 0xF4, 4) != 0) {
++                playerHUD[id].unk_7C++;
+             }
+             break;
+         case 3:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].lap2CompletionTimeX, 0xE4, 4) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7C++;
++            if (s16_step_towards(&playerHUD[id].lap2CompletionTimeX, 0xE4, 4) != 0) {
++                playerHUD[id].unk_7C++;
+             }
+             break;
+         case 4:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].lap2CompletionTimeX, 0xEC, 4) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7C++;
++            if (s16_step_towards(&playerHUD[id].lap2CompletionTimeX, 0xEC, 4) != 0) {
++                playerHUD[id].unk_7C++;
+             }
+             break;
+         case 5:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].lap2CompletionTimeX, 0xE4, 4) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7C++;
++            if (s16_step_towards(&playerHUD[id].lap2CompletionTimeX, 0xE4, 4) != 0) {
++                playerHUD[id].unk_7C++;
+             }
+             break;
+         case 6:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].lap2CompletionTimeX, 0xE8, 2) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7C++;
++            if (s16_step_towards(&playerHUD[id].lap2CompletionTimeX, 0xE8, 2) != 0) {
++                playerHUD[id].unk_7C++;
+             }
+             break;
+         case 7:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].lap2CompletionTimeX, 0xE4, 2) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7C++;
++            if (s16_step_towards(&playerHUD[id].lap2CompletionTimeX, 0xE4, 2) != 0) {
++                playerHUD[id].unk_7C++;
+             }
+             break;
+         case 8:
+-            playerHUD[PLAYER_ONE].unk_7C = 0;
++            playerHUD[id].unk_7C = 0;
+             break;
+     }
+-    switch (playerHUD[PLAYER_ONE].unk_7F) {
++    switch (playerHUD[id].unk_7F) {
+         case 0:
+             break;
+         case 1:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].lapAfterImage2X, 0x53, 0x10) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7F++;
++            if (s16_step_towards(&playerHUD[id].lapAfterImage2X, 0x53, 0x10) != 0) {
++                playerHUD[id].unk_7F++;
+             }
+             break;
+         case 2:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].lapAfterImage2X, 0x43, 4) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7F++;
++            if (s16_step_towards(&playerHUD[id].lapAfterImage2X, 0x43, 4) != 0) {
++                playerHUD[id].unk_7F++;
+             }
+             break;
+         case 3:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].lapAfterImage2X, 0x53, 4) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7F++;
++            if (s16_step_towards(&playerHUD[id].lapAfterImage2X, 0x53, 4) != 0) {
++                playerHUD[id].unk_7F++;
+             }
+             break;
+         case 4:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].lapAfterImage2X, 0x4B, 4) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7F++;
++            if (s16_step_towards(&playerHUD[id].lapAfterImage2X, 0x4B, 4) != 0) {
++                playerHUD[id].unk_7F++;
+             }
+             break;
+         case 5:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].lapAfterImage2X, 0x53, 4) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7F++;
++            if (s16_step_towards(&playerHUD[id].lapAfterImage2X, 0x53, 4) != 0) {
++                playerHUD[id].unk_7F++;
+             }
+             break;
+         case 6:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].lapAfterImage2X, 0x4F, 2) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7F++;
++            if (s16_step_towards(&playerHUD[id].lapAfterImage2X, 0x4F, 2) != 0) {
++                playerHUD[id].unk_7F++;
+             }
+             break;
+         case 7:
+-            if (s16_step_towards(&playerHUD[PLAYER_ONE].lapAfterImage2X, 0x53, 2) != 0) {
+-                playerHUD[PLAYER_ONE].unk_7F++;
++            if (s16_step_towards(&playerHUD[id].lapAfterImage2X, 0x53, 2) != 0) {
++                playerHUD[id].unk_7F++;
+             }
+             break;
+         case 8:
+-            playerHUD[PLAYER_ONE].unk_7F = 0;
++            playerHUD[id].unk_7F = 0;
+             break;
+     }
+ }
+ 
++void func_8005AB60(void) {
++    s32 i;
++
++    for (i = 0; i < netrace_human_loop_count(); i++) {
++        hud_intro_step(i);
++    }
++}
++
+ void func_8005B7A0(void) {
+     f32 temp_f0;
+     f32* temp_s2;
+@@ -1871,25 +1884,32 @@ void func_8005B914(void) {
+             if (gModeSelection == TIME_TRIALS) {
+                 playerHUD[PLAYER_ONE].unk_80 = 1;
+             }
+-            playerHUD[PLAYER_ONE].unk_78 = 1;
+-            playerHUD[PLAYER_ONE].unk_7A = 1;
+-            playerHUD[PLAYER_ONE].unk_7D = 1;
++            // Every human driver's HUD slides in (Couch Party / LAN: one per view).
++            for (i = 0; i < netrace_human_loop_count(); i++) {
++                playerHUD[i].unk_78 = 1;
++                playerHUD[i].unk_7A = 1;
++                playerHUD[i].unk_7D = 1;
++            }
+             func_8005AA4C();
+             break;
+         case 0x3:
+             func_8005AA94(0);
+             break;
+         case 0x4:
+-            playerHUD[PLAYER_ONE].unk_7B = 1;
+-            playerHUD[PLAYER_ONE].unk_7E = 1;
++            for (i = 0; i < netrace_human_loop_count(); i++) {
++                playerHUD[i].unk_7B = 1;
++                playerHUD[i].unk_7E = 1;
++            }
+             func_8005AA4C();
+             break;
+         case 0x5:
+             func_8005AA94(0);
+             break;
+         case 0x6:
+-            playerHUD[PLAYER_ONE].unk_7C = 1;
+-            playerHUD[PLAYER_ONE].unk_7F = 1;
++            for (i = 0; i < netrace_human_loop_count(); i++) {
++                playerHUD[i].unk_7C = 1;
++                playerHUD[i].unk_7F = 1;
++            }
+             func_8005AA4C();
+             func_8005AA80();
+             break;
+diff --git a/src/render_objects.c b/src/render_objects.c
+index 9e37de9ce..77b7f2b34 100644
+--- a/src/render_objects.c
++++ b/src/render_objects.c
+@@ -1624,8 +1624,12 @@ void render_texture_rectangle_wide(s32 x, s32 y, s32 width, s32 height, s32 arg4
+             case SCREEN_MODE_3P_4P_SPLITSCREEN:
+             case SCREEN_MODE_2P_SPLITSCREEN_HORIZONTAL:
+                 if ((xl - (width / 2)) < (SCREEN_WIDTH / 2)) {
+-                    coordX = (s32) OTRGetDimensionFromLeftEdge(xl) << 2;
+-                    coordX2 = (s32) (xh) << 2;
++                    // Move both edges with the left side of the screen. The right edge used
++                    // to stay put, so in a view narrower than 4:3 (e.g. two players side by
++                    // side) it ended up left of the left edge and the picture vanished:
++                    // the lap counter in Couch Party / LAN split screens.
++                    coordX = (s32) (OTRGetDimensionFromLeftEdge(xl) * 4.0f);
++                    coordX2 = coordX + ((xh - xl) << 2);
+                 } else {
+                     coordX = (s32) OTRGetDimensionFromRightEdge(xl) << 2;
+                     coordX2 = (s32) OTRGetDimensionFromRightEdge(xh) << 2;
+@@ -2548,8 +2552,9 @@ void render_speedometer(s32 playerIdx) {
+                   // RGBA
+                   CM_GetProps()->Minimap.Colour.r, CM_GetProps()->Minimap.Colour.g, CM_GetProps()->Minimap.Colour.b,
+                   0xFF, (u8*) common_texture_speedometer, speedometer_vtx, 64, 96, 64, 48);
+-    // x, y, needle rot
+-    func_8004A258(D_8018CFEC, D_8018CFF4, D_8016579E, 1.0f, (u8*) common_texture_speedometer_needle, D_0D005FF0, 0x40,
++    // x, y, needle rot. The needle sits on this player's own dial (each view
++    // of a Couch Party / LAN race has one); D_8018CFEC/D_8018CFF4 are player 1's.
++    func_8004A258(playerHUD[playerIdx].speedometerX + 0x18, playerHUD[playerIdx].speedometerY + 6, D_8016579E, 1.0f, (u8*) common_texture_speedometer_needle, D_0D005FF0, 0x40,
+                   0x20, 0x40, 0x20);
+ }
+ 
+diff --git a/src/render_player.c b/src/render_player.c
+index a4e48a066..8b3d41645 100644
+--- a/src/render_player.c
++++ b/src/render_player.c
+@@ -1,6 +1,7 @@
+ #include "port/couch/couch.h"
+ #include <libultraship.h>
+ #include "port/localplay/localplay.h"
++#include "port/netplay/netrace.h"
+ #include <macros.h>
+ #include <mk64.h>
+ #include <stubs.h>
+@@ -118,6 +119,13 @@ u16 check_player_camera_collision(Player* player, Camera* camera, f32 arg2, f32
+     if (CVarGetInteger("gNoCulling", 0) == 1) {
+         return true;
+     }
++    // Couch Party / LAN races: draw every kart at any distance. The stock limits
++    // were tuned for the N64 (a kart vanished a few hundred units ahead), which is
++    // very visible in big, sharp split-screen views. Drawing 8 karts costs nothing
++    // on a PC, and karts behind the camera are clipped by the GPU anyway.
++    if (netrace_active()) {
++        return true;
++    }
+ 
+     ret = false;
+     switch (gActiveScreenMode) { /* irregular */
+-- 
+2.43.0
+

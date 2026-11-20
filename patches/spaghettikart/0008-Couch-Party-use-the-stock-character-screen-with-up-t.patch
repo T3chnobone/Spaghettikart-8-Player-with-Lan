@@ -1,0 +1,1209 @@
+From 49865161aa46125bbfc9b4a7e5a6df1df5e7f2b3 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 28 Oct 2026 18:37:52 +0000
+Subject: [PATCH 08/17] Couch Party: use the stock character screen with up to
+ 8 cursors
+
+The overlay lobby is replaced by the original character select. Player 1
+starts with a cursor; every other controller presses A to join and gets
+its own cursor (1P-4P as stock, 5P-8P drawn as coloured frames). Picking,
+un-picking and OK work as in the original; B before picking lets a joined
+player leave. At least 2 players are needed to move on. Each player keeps
+the controller they joined with through the course select and races.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Qq7B1uqfWVWykYRDDMiuXa
+---
+ docs/COUCH_PARTY.md                   |  35 +--
+ src/menu_items.c                      |  68 ++++-
+ src/menu_items.h                      |   9 +-
+ src/menus.c                           |  26 +-
+ src/menus.h                           |   4 +-
+ src/port/couch/CouchParty.cpp         | 383 ++++++++++++--------------
+ src/port/couch/CouchParty.h           |  23 +-
+ src/port/couch/couch.h                |  13 +-
+ src/port/localplay/localplay_render.c |   4 +-
+ src/port/ui/CouchWindow.cpp           | 127 ---------
+ src/port/ui/CouchWindow.h             |  14 -
+ src/port/ui/ImguiUI.cpp               |  10 +-
+ 12 files changed, 311 insertions(+), 405 deletions(-)
+
+diff --git a/docs/COUCH_PARTY.md b/docs/COUCH_PARTY.md
+index e3744e1..422bb69 100644
+--- a/docs/COUCH_PARTY.md
++++ b/docs/COUCH_PARTY.md
+@@ -6,19 +6,19 @@ VS races and Battles for 2 to 8 people on one PC, each with their own view.
+ 
+ 1. On the main menu, move right to the third column, **COUCH PARTY** (it
+    replaces 3P and 4P). Choose **VS** (then a class) or **BATTLE** and OK.
+-2. The **Couch Party lobby** opens instead of the character screen. Each
+-   player presses **A** on their own controller to join — up to 8.
+-   - **Left / Right:** change character (no two players share one, unless
+-     "unique characters" is off in the enhancements).
+-   - **A:** ready. **B:** un-ready, or leave if not ready.
+-   - **B** on a controller that hasn't joined, with nobody joined, goes back.
+-   - When 2 or more players have joined and everyone is ready, any of them
+-     presses **START** (or A again) to go on.
+-   The mouse works too: click a tile to change character, then Start.
+-3. Player 1 (the first to join) picks the cup and course, as usual.
++2. The normal **character select** screen opens, with player 1's cursor.
++   Everyone else presses **A** on their own controller to join: each gets a
++   cursor of their own (1P–4P as usual, then 5P–8P in new colours), up to 8.
++   - Move the cursor and press **A** to pick, **B** to un-pick — exactly as in
++     the original.
++   - **B** before picking makes a joined player (2P–8P) leave again; player
++     1's B goes back to the main menu, as usual.
++   - When at least 2 players have joined and everyone has picked, **OK?**
++     appears: A goes on.
++3. Player 1 picks the cup and course, as usual.
+ 4. Everyone gets their own view and HUD, arranged by the **Split screen**
+-   setting (on the lobby, or Settings → Local Multiplayer, where the monitors
+-   are too). Each player keeps the controller they joined with.
++   setting (Settings → Local Multiplayer, where the monitors are too). Each
++   player keeps the controller they joined with.
+ 
+ **VS:** 3 laps, VS items, no CPU drivers. The race ends when all but one player
+ have finished.
+@@ -27,7 +27,7 @@ start on the usual 4-player spots and players 5–8 beside them.
+ 
+ After each race a results panel shows the places and each player's wins this
+ session. Any player picks **Race again**, **Change course**, **Change drivers**
+-(back to the lobby with everyone still joined) or **Quit to menu** with
++(back to character select with everyone still joined) or **Quit to menu** with
+ Up/Down and A. The pause menu works as in a normal VS race.
+ 
+ To get the stock 3P/4P columns back, untick **COUCH PARTY on the main menu**
+@@ -51,7 +51,8 @@ views.
+ 
+ ## Limits (first version, untested on real hardware)
+ 
+-- The lobby and results are overlay panels, not N64-style menus.
++- The results are an overlay panel, not an N64-style screen.
++- Cursors 5P–8P are drawn as coloured frames (the game only has 1P–4P art).
+ - The VS win counters on the stock results screens aren't updated.
+ - Battle start spots for players 5–8 are offsets from the stock ones; on custom
+   battle arenas everyone uses Block Fort's spacing.
+@@ -60,9 +61,9 @@ views.
+ 
+ | File | Role |
+ | --- | --- |
+-| `src/port/couch/CouchParty.{h,cpp}`, `couch.h` | Lobby, roster and controller order, race setup, results. |
+-| `src/port/ui/CouchWindow.{h,cpp}` | The lobby and results panels. |
+-| `src/menus.c`, `src/menu_items.c` | Third main menu column; hooks into the menu states. |
++| `src/port/couch/CouchParty.{h,cpp}`, `couch.h` | Joining the character screen, controller order, race setup, results. |
++| `src/port/ui/CouchWindow.{h,cpp}` | The results panel. |
++| `src/menus.c`, `src/menu_items.c` | Third main menu column; 8 cursors on the character screen; hooks into the menu states. |
+ | `src/spawn_players.c` | 8-player VS grid and Battle spots. |
+ | `src/racing/race_logic.c` | VS finish, Battle eliminations, results instead of the stock zoom. |
+ | `src/player_controller.c`, `src/render_player.c`, `src/code_80057C60.c`, `src/render_objects.c`, `src/code_80005FD0.c`, `src/engine/RaceManager.cpp` | Every couch player drives, is drawn, ranked, on the minimap, and gets VS items. |
+diff --git a/src/menu_items.c b/src/menu_items.c
+index 6174a1a..6199c8a 100644
+--- a/src/menu_items.c
++++ b/src/menu_items.c
+@@ -2719,6 +2719,12 @@ void setup_menus(void) {
+                 add_menu_item(CHARACTER_SELECT_MENU_2P_CURSOR, 0, 0, MENU_ITEM_PRIORITY_C);
+                 add_menu_item(CHARACTER_SELECT_MENU_3P_CURSOR, 0, 0, MENU_ITEM_PRIORITY_C);
+                 add_menu_item(CHARACTER_SELECT_MENU_4P_CURSOR, 0, 0, MENU_ITEM_PRIORITY_C);
++                if (gCouchParty) {
++                    add_menu_item(COUCH_SELECT_MENU_5P_CURSOR, 0, 0, MENU_ITEM_PRIORITY_C);
++                    add_menu_item(COUCH_SELECT_MENU_6P_CURSOR, 0, 0, MENU_ITEM_PRIORITY_C);
++                    add_menu_item(COUCH_SELECT_MENU_7P_CURSOR, 0, 0, MENU_ITEM_PRIORITY_C);
++                    add_menu_item(COUCH_SELECT_MENU_8P_CURSOR, 0, 0, MENU_ITEM_PRIORITY_C);
++                }
+                 break;
+             case COURSE_SELECT_MENU:
+                 add_menu_item(COURSE_SELECT_BACKGROUND, 0, 0, MENU_ITEM_PRIORITY_2);
+@@ -6607,6 +6613,12 @@ void render_menus(MenuItem* arg0) {
+                     render_cursor_player(arg0, temp_a0, temp_t2);
+                 }
+                 break;
++            case COUCH_SELECT_MENU_5P_CURSOR:
++            case COUCH_SELECT_MENU_6P_CURSOR:
++            case COUCH_SELECT_MENU_7P_CURSOR:
++            case COUCH_SELECT_MENU_8P_CURSOR:
++                render_couch_cursor(arg0, 4 + (arg0->type - COUCH_SELECT_MENU_5P_CURSOR));
++                break;
+             case CHARACTER_SELECT_MENU_OK:
+                 func_800A8564(arg0);
+                 gDisplayListHead =
+@@ -9269,6 +9281,12 @@ void handle_menus_with_pri_arg(s32 priSpecial) {
+             case CHARACTER_SELECT_MENU_4P_CURSOR:
+                 update_cursor(menuItem);
+                 break;
++            case COUCH_SELECT_MENU_5P_CURSOR:
++            case COUCH_SELECT_MENU_6P_CURSOR:
++            case COUCH_SELECT_MENU_7P_CURSOR:
++            case COUCH_SELECT_MENU_8P_CURSOR:
++                update_couch_cursor(menuItem);
++                break;
+             case CHARACTER_SELECT_MENU_MARIO:
+             case CHARACTER_SELECT_MENU_LUIGI:
+             case CHARACTER_SELECT_MENU_TOAD:
+@@ -10698,6 +10716,51 @@ void func_800AAC18(MenuItem* arg0) {
+     }
+ }
+ 
++// Couch Party players 5-8: the stock cursors only come in 1P-4P, so these are
++// drawn as a frame in the player's colour with a "5P".."8P" tag.
++void render_couch_cursor(MenuItem* arg0, s32 playerId) {
++    static const u8 sColors[4][3] = { { 255, 140, 30 }, { 180, 90, 255 }, { 40, 220, 200 }, { 255, 90, 160 } };
++    static char* const sTags[4] = { "5P", "6P", "7P", "8P" };
++    const u8* c = sColors[(playerId - 4) & 3];
++    s32 x0 = arg0->column;
++    s32 y0 = arg0->row;
++    s32 x1 = x0 + 0x40;
++    s32 y1 = y0 + 0x4C;
++    s32 alpha = 255;
++
++    if ((playerId < 4) || (playerId >= (s32) ARRAY_COUNT(gCharacterGridSelections)) ||
++        (gCharacterGridSelections[playerId] == 0)) {
++        return;
++    }
++    if (gCharacterGridIsSelected[playerId]) {
++        // Locked in: pulse, like the stock cursors.
++        s32 t = gGlobalTimer % 16;
++        alpha = 0xBF + ((t >= 8) ? ((16 - t) * 8) : (t * 8));
++        if (alpha > 255) {
++            alpha = 255;
++        }
++    }
++    gDisplayListHead = draw_box(gDisplayListHead, x0, y0, x1, y0 + 3, c[0], c[1], c[2], alpha);
++    gDisplayListHead = draw_box(gDisplayListHead, x0, y1 - 3, x1, y1, c[0], c[1], c[2], alpha);
++    gDisplayListHead = draw_box(gDisplayListHead, x0, y0, x0 + 3, y1, c[0], c[1], c[2], alpha);
++    gDisplayListHead = draw_box(gDisplayListHead, x1 - 3, y0, x1, y1, c[0], c[1], c[2], alpha);
++    gDisplayListHead = draw_box(gDisplayListHead, x0, y0, x0 + 20, y0 + 12, c[0], c[1], c[2], alpha);
++    set_text_color(TEXT_YELLOW);
++    print_text_mode_1(x0 + 2, y0 + 11, sTags[(playerId - 4) & 3], 0, 0.6f, 0.6f);
++}
++
++void update_couch_cursor(MenuItem* arg0) {
++    s32 playerId = 4 + (arg0->type - COUCH_SELECT_MENU_5P_CURSOR);
++    s8 characterSelectionIndex = gCharacterGridSelections[playerId];
++
++    // Above the portraits, between the stock cursors.
++    arg0->priority = 0xD - ((playerId - 4) * 2);
++    if (arg0->priority < 9) {
++        arg0->priority = 9;
++    }
++    hover_cursor_over_character_portrait(arg0, characterSelectionIndex - 1);
++}
++
+ void update_cursor(MenuItem* arg0) {
+     s32 playerId;
+     s8 characterSelectionIndex;
+@@ -10713,7 +10776,7 @@ void func_800AAE18(MenuItem* arg0) {
+ 
+     temp_v0 = func_800AAFCC(arg0->type - CHARACTER_SELECT_MENU_MARIO);
+     if (temp_v0 >= 0) {
+-        arg0->priority = 0xE - (temp_v0 * 2);
++        arg0->priority = 0xE - ((temp_v0 & 3) * 2);
+     } else {
+         arg0->priority = 6;
+     }
+@@ -10850,7 +10913,8 @@ s32 func_800AAFCC(s32 characterId) {
+     s32 someIndex = 0;
+     s32 ret = false;
+ 
+-    for (; someIndex < 4; someIndex++) {
++    // 8 players in Couch Party; the other slots stay empty otherwise.
++    for (; someIndex < (s32) ARRAY_COUNT(gCharacterGridSelections); someIndex++) {
+         if ((characterId + 1) == gCharacterGridSelections[someIndex]) {
+             ret = true;
+             break;
+diff --git a/src/menu_items.h b/src/menu_items.h
+index 54838ac..a01c1e5 100644
+--- a/src/menu_items.h
++++ b/src/menu_items.h
+@@ -316,7 +316,12 @@ enum MENU_ITEM_TYPE {
+     MENU_ITEM_TYPE_1CC,
+     MENU_ITEM_TYPE_1CD,
+     MENU_ITEM_TYPE_1CE,
+-    MENU_ITEM_UI_HARBOUR_MASTERS
++    MENU_ITEM_UI_HARBOUR_MASTERS,
++    // Couch Party: cursors for players 5-8 on the character screen.
++    COUCH_SELECT_MENU_5P_CURSOR,
++    COUCH_SELECT_MENU_6P_CURSOR,
++    COUCH_SELECT_MENU_7P_CURSOR,
++    COUCH_SELECT_MENU_8P_CURSOR
+ };
+ 
+ enum LoadImgCompType {
+@@ -502,6 +507,8 @@ void func_800A0DFC(void);
+ void func_800A0EB8(MenuItem*, s32);
+ void func_800A0FA4(MenuItem*, s32);
+ void draw_couch_party_column_title(MenuItem*);
++void render_couch_cursor(MenuItem*, s32 playerId);
++void update_couch_cursor(MenuItem*);
+ void func_800A10CC(MenuItem*);
+ void render_cursor_player(MenuItem*, s32, s32);
+ void func_800A12BC(MenuItem*, MenuTexture*);
+diff --git a/src/menus.c b/src/menus.c
+index d78790d..71f63a8 100644
+--- a/src/menus.c
++++ b/src/menus.c
+@@ -1,4 +1,5 @@
+ #include "port/couch/couch.h"
++#include "port/netplay/netrace.h"
+ #include <libultraship.h>
+ #include <libultraship/bridge/audiobridge.h>
+ #include <macros.h>
+@@ -35,8 +36,9 @@ f32 gIntroModelPosX;
+ f32 gIntroModelPosY;
+ f32 gIntroModelPosZ;
+ s32 gMenuFadeType;
+-s8 gCharacterGridSelections[4];   // Map from each player to current grid position (1-4 top, 5-8 bottom)
+-bool gCharacterGridIsSelected[4]; // Sets true if a character is selected for each player
++// 8 entries for Couch Party (stock menus use the first 4).
++s8 gCharacterGridSelections[8];   // Map from each player to current grid position (1-4 top, 5-8 bottom)
++bool gCharacterGridIsSelected[8]; // Sets true if a character is selected for each player
+ s8 gSubMenuSelection;             // Map Select states, Options and Ghost Data text selection
+ s8 gMainMenuSelection;
+ s8 gPlayerSelectMenuSelection; // grid screen state?
+@@ -66,7 +68,7 @@ s8 unref_D_8018EE0C; // Set to 0 but never referenced
+ /** Data **/
+ s32 gMenuSelection = HARBOUR_MASTERS_MENU;
+ s32 gFadeModeSelection = FADE_MODE_NONE;
+-s8 gCharacterSelections[4] = { MARIO, LUIGI, YOSHI, TOAD };
++s8 gCharacterSelections[8] = { MARIO, LUIGI, YOSHI, TOAD, DK, WARIO, PEACH, BOWSER };
+ 
+ // The current row selected in the mode column for each player indexed
+ // 0-1 1p / 0-2 2p´/ 0-1 3p / 0-1 4p
+@@ -220,6 +222,18 @@ void update_menus(void) {
+                     break;
+                 case PLAYER_SELECT_MENU_FROM_QUIT:
+                 case CHARACTER_SELECT_MENU:
++                    if (couch_select_active()) {
++                        // Couch Party: up to 8 cursors, one per joined player.
++                        if (controllerIdx == PLAYER_ONE) {
++                            u16 k;
++                            for (k = 0; k < ARRAY_COUNT(gCharacterGridSelections); k++) {
++                                if (gCharacterGridSelections[k] != 0) {
++                                    player_select_menu_act(get_player_controller(k), k);
++                                }
++                            }
++                        }
++                        break;
++                    }
+                     player_select_menu_act(&gControllers[controllerIdx], controllerIdx);
+                     break;
+                 case COURSE_SELECT_MENU_FROM_QUIT:
+@@ -1604,7 +1618,7 @@ void player_select_menu_act(struct Controller* controller, u16 controllerIdx) {
+                 if ((btnAndStick & A_BUTTON) && (gCharacterGridIsSelected[controllerIdx] == 0)) {
+                     gCharacterGridIsSelected[controllerIdx] = true;
+                     i = sCharacterGridOrder[gCharacterGridSelections[controllerIdx] - 1];
+-                    func_800C90F4(controllerIdx, 0x2900800e + (i << 4));
++                    func_800C90F4(controllerIdx & 3, 0x2900800e + (i << 4)); // the voice; 4 sound slots
+                 }
+                 // L800B36F4
+                 selected = false;
+@@ -1616,7 +1630,8 @@ void player_select_menu_act(struct Controller* controller, u16 controllerIdx) {
+                 }
+                 // L800B3738
+ 
+-                if (!selected) {
++                // Couch Party needs at least 2 players.
++                if (!selected && couch_select_can_finish()) {
+                     gPlayerSelectMenuSelection = PLAYER_SELECT_MENU_OK;
+                     reset_cycle_flash_menu();
+                     gMenuTimingCounter = 0;
+@@ -2063,6 +2078,7 @@ void load_menu_states(s32 menuSelection) {
+             break;
+         }
+     }
++    couch_on_menu_loaded(menuSelection); // Couch Party: its own players on the character screen
+     reset_cycle_flash_menu();
+ }
+ 
+diff --git a/src/menus.h b/src/menus.h
+index 616d110..eb49aa5 100644
+--- a/src/menus.h
++++ b/src/menus.h
+@@ -227,8 +227,8 @@ extern f32 gIntroModelPosY;
+ extern f32 gIntroModelPosZ;
+ extern s32 gMenuFadeType;
+ 
+-extern s8 gCharacterGridSelections[];
+-extern bool gCharacterGridIsSelected[];
++extern s8 gCharacterGridSelections[8];
++extern bool gCharacterGridIsSelected[8];
+ extern s8 gSubMenuSelection;
+ extern s8 gMainMenuSelection;
+ extern s8 gPlayerSelectMenuSelection;
+diff --git a/src/port/couch/CouchParty.cpp b/src/port/couch/CouchParty.cpp
+index 46bbf9d..87ba1d6 100644
+--- a/src/port/couch/CouchParty.cpp
++++ b/src/port/couch/CouchParty.cpp
+@@ -1,10 +1,12 @@
+-// Couch Party: the lobby (controllers join and pick characters), setting up
+-// the VS/Battle race for up to 8 local players, and the results screen.
++// Couch Party: players joining the (stock) character screen with their own
++// controllers, setting up the VS/Battle race for up to 8 local players, and
++// the results screen.
+ 
+ #include "CouchParty.h"
+ #include "couch.h"
+ 
+ #include <algorithm>
++#include <cstdlib>
+ #include <cstring>
+ 
+ #include <libultraship/libultraship.h>
+@@ -23,7 +25,6 @@ extern "C" {
+ }
+ 
+ namespace GameUI {
+-void ShowCouchLobby(bool show);
+ void ShowCouchResults(bool show);
+ } // namespace GameUI
+ 
+@@ -35,8 +36,13 @@ namespace Couch {
+ 
+ namespace {
+ 
+-Lobby sLobby;
+ Results sResults;
++// Character screen: the controller port of each joined player (-1 = free).
++std::array<int, kMaxPlayers> sSlotPort = { 0, -1, -1, -1, -1, -1, -1, -1 };
++std::array<bool, kMaxPlayers> sWaitRelease{};
++std::array<uint16_t, MAXCONTROLLERS> sRawPrev{};
++bool sOnSelect = false;   // on the couch character screen
++bool sFreshSelect = false; // the character screen was opened from the main menu
+ std::array<int, kMaxPlayers> sWins{};
+ 
+ // The roster that raced last (set when the lobby starts a race).
+@@ -46,9 +52,6 @@ std::array<int, kMaxPlayers> sPorts{};
+ std::array<int, kMaxPlayers> sCharacters{};
+ bool sOwnsBigRace = false;
+ bool sWasCouch = false;
+-// The lobby asked to leave (start or back); don't reopen it while the
+-// character screen fades out.
+-bool sLeavingLobby = false;
+ // Take the buttons already held as the starting state (e.g. A held while
+ // driving when the results appear) so only new presses count.
+ bool sPrimeEdges = false;
+@@ -57,11 +60,11 @@ bool sPrimeEdges = false;
+ std::vector<int> sFinishOrder;
+ std::vector<int> sEliminated;
+ 
+-enum class Pending { None, Start, Back, Result };
++enum class Pending { None, Result };
+ Pending sPending = Pending::None;
+ int sPendingResult = 0;
+ 
+-// Per-port input edges for the lobby and results.
++// Per-player input edges for the results.
+ struct PadEdge {
+     uint16_t buttons = 0;
+     int8_t dirX = 0, dirY = 0;
+@@ -116,57 +119,133 @@ void PrimeEdges(const OSContPad* pads) {
+     sPrimeEdges = false;
+ }
+ 
+-bool CharacterTaken(int character, int exceptSlot) {
+-    if (!UniqueCharacters()) {
+-        return false;
+-    }
+-    for (int i = 0; i < kMaxPlayers; i++) {
+-        if (i != exceptSlot && sLobby.slots[i].joined && sLobby.slots[i].character == character) {
+-            return true;
+-        }
++// ---- the character screen's players (stock screen, up to 8 cursors) ----
++
++int JoinedCount() {
++    int n = 0;
++    for (int port : sSlotPort) {
++        n += port >= 0 ? 1 : 0;
+     }
+-    return false;
++    return n;
+ }
+ 
+ int SlotForPort(int port) {
+-    for (int i = 0; i < kMaxPlayers; i++) {
+-        if (sLobby.slots[i].joined && sLobby.slots[i].port == port) {
+-            return i;
++    for (int k = 0; k < kMaxPlayers; k++) {
++        if (sSlotPort[k] == port) {
++            return k;
+         }
+     }
+     return -1;
+ }
+ 
++// A new controller joins: the next free player, its cursor on the first free
++// character.
+ void Join(int port) {
+-    for (int i = 0; i < kMaxPlayers; i++) {
+-        Slot& s = sLobby.slots[i];
+-        if (s.joined) {
+-            continue;
++    int k = JoinedCount();
++    if (k >= kMaxPlayers) {
++        return;
++    }
++    s32 grid = 1;
++    for (s32 g = 1; g <= 8; g++) {
++        if (is_character_spot_free(g)) {
++            grid = g;
++            break;
+         }
+-        s = Slot{};
+-        s.joined = true;
+-        s.port = port;
+-        s.character = i;
+-        if (CharacterTaken(s.character, i)) {
+-            for (int c = 0; c < 8; c++) {
+-                if (!CharacterTaken(c, i)) {
+-                    s.character = c;
+-                    break;
++    }
++    sSlotPort[k] = port;
++    sWaitRelease[k] = true; // the A that joined mustn't also pick the character
++    gCharacterGridSelections[k] = (s8) grid;
++    gCharacterGridIsSelected[k] = false;
++    gCharacterSelections[k] = sCharacterGridOrder[grid - 1];
++    if (gPlayerSelectMenuSelection != PLAYER_SELECT_MENU_MAIN) {
++        gPlayerSelectMenuSelection = PLAYER_SELECT_MENU_MAIN; // someone new: not everyone's ready
++    }
++    play_sound2(SOUND_MENU_SELECT);
++}
++
++// Player k leaves; the players after them move up one.
++void Leave(int k) {
++    for (int i = k; i < kMaxPlayers - 1; i++) {
++        sSlotPort[i] = sSlotPort[i + 1];
++        gCharacterGridSelections[i] = gCharacterGridSelections[i + 1];
++        gCharacterGridIsSelected[i] = gCharacterGridIsSelected[i + 1];
++        gCharacterSelections[i] = gCharacterSelections[i + 1];
++    }
++    sSlotPort[kMaxPlayers - 1] = -1;
++    gCharacterGridSelections[kMaxPlayers - 1] = 0;
++    gCharacterGridIsSelected[kMaxPlayers - 1] = false;
++    for (int i = k; i < kMaxPlayers; i++) {
++        sWaitRelease[i] = true; // indexes moved: wait for hands off
++    }
++    play_sound2(SOUND_MENU_GO_BACK);
++}
++
++// Only player 1 to start with (as on the stock screen); others press A.
++void FreshRoster() {
++    sSlotPort.fill(-1);
++    sWaitRelease.fill(false);
++    sSlotPort[0] = 0;
++    for (int k = 0; k < kMaxPlayers; k++) {
++        gCharacterGridSelections[k] = (s8) (k == 0 ? 1 : 0);
++        gCharacterGridIsSelected[k] = false;
++    }
++    gCharacterSelections[0] = sCharacterGridOrder[0];
++}
++
++// Character screen input: joins and leaves from the raw ports, then each
++// player's controller is put in their slot for the stock screen code.
++void SelectInput(OSContPad* pads) {
++    OSContPad raw[MAXCONTROLLERS];
++    std::memcpy(raw, pads, sizeof(raw));
++    std::array<uint16_t, MAXCONTROLLERS> pressed{};
++    for (int port = 0; port < MAXCONTROLLERS; port++) {
++        uint16_t held = (uint16_t) raw[port].button;
++        pressed[port] = held & ~sRawPrev[port];
++        sRawPrev[port] = held;
++    }
++    bool canChange = !is_screen_being_faded();
++    bool someoneLeft = false;
++    if (canChange) {
++        for (int port = 0; port < MAXCONTROLLERS; port++) {
++            int k = SlotForPort(port);
++            if (k < 0) {
++                if (pressed[port] & (A_BUTTON | START_BUTTON)) {
++                    Join(port);
+                 }
++            } else if (k > 0 && (pressed[port] & B_BUTTON) && !gCharacterGridIsSelected[k] &&
++                       (gPlayerSelectMenuSelection == PLAYER_SELECT_MENU_MAIN)) {
++                // B before picking: that player leaves (player 1's B goes back, as usual).
++                Leave(k);
++                someoneLeft = true;
++                break;
+             }
+         }
+-        play_sound2(SOUND_MENU_SELECT);
+-        return;
++    }
++    for (int k = 0; k < MAXCONTROLLERS; k++) {
++        int port = k < kMaxPlayers ? sSlotPort[k] : -1;
++        if (port < 0 || someoneLeft) {
++            std::memset(&pads[k], 0, sizeof(OSContPad));
++            continue;
++        }
++        pads[k] = raw[port];
++        if (sWaitRelease[k]) {
++            bool idle = raw[port].button == 0 && std::abs(raw[port].stick_x) < 30 && std::abs(raw[port].stick_y) < 30;
++            if (idle) {
++                sWaitRelease[k] = false;
++            }
++            std::memset(&pads[k], 0, sizeof(OSContPad));
++        }
+     }
+ }
+ 
+-// Removes a player; the ones after move up so joined players stay P1..PN.
+-void Leave(int slot) {
+-    for (int i = slot; i < kMaxPlayers - 1; i++) {
+-        sLobby.slots[i] = sLobby.slots[i + 1];
++// Leaving the character screen for the course select: these players race.
++void CommitRoster() {
++    sCount = JoinedCount();
++    for (int k = 0; k < kMaxPlayers; k++) {
++        sPorts[k] = k < sCount ? sSlotPort[k] : -1;
++        sCharacters[k] = k < sCount ? (gCharacterSelections[k] & 7) : k;
+     }
+-    sLobby.slots[kMaxPlayers - 1] = Slot{};
+-    play_sound2(SOUND_MENU_GO_BACK);
++    sCommitted = true;
+ }
+ 
+ void ReleaseBigRace() {
+@@ -183,10 +262,9 @@ void CouchOff() {
+     ReleaseBigRace();
+     sCommitted = false;
+     sCount = 0;
+-    sLobby = Lobby{};
++    sOnSelect = false;
+     sResults = Results{};
+     sWins.fill(0);
+-    GameUI::ShowCouchLobby(false);
+     GameUI::ShowCouchResults(false);
+ }
+ 
+@@ -203,53 +281,6 @@ void ApplyRoster() {
+     sOwnsBigRace = true;
+ }
+ 
+-void LobbyInput(const OSContPad* pads) {
+-    bool anyoneJoined = sLobby.JoinedCount() > 0;
+-    for (int port = 0; port < MAXCONTROLLERS; port++) {
+-        PadInput in = ReadEdge(port, pads[port]);
+-        int slot = SlotForPort(port);
+-        if (slot < 0) {
+-            if (in.pressed & (A_BUTTON | START_BUTTON)) {
+-                Join(port);
+-            } else if ((in.pressed & B_BUTTON) && !anyoneJoined) {
+-                sPending = Pending::Back;
+-            }
+-            continue;
+-        }
+-        Slot& s = sLobby.slots[slot];
+-        if (in.pressed & START_BUTTON) {
+-            if (sLobby.CanStart()) {
+-                sPending = Pending::Start;
+-            } else if (!s.ready) {
+-                s.ready = true;
+-                play_sound2(SOUND_MENU_SELECT);
+-            }
+-            continue;
+-        }
+-        if (in.pressed & B_BUTTON) {
+-            if (s.ready) {
+-                s.ready = false;
+-                play_sound2(SOUND_MENU_GO_BACK);
+-            } else {
+-                Leave(slot);
+-            }
+-            continue;
+-        }
+-        if (in.pressed & A_BUTTON) {
+-            if (!s.ready) {
+-                s.ready = true;
+-                func_800C90F4(0, 0x2900800e + (s.character << 4)); // the character's voice
+-            } else if (sLobby.CanStart()) {
+-                sPending = Pending::Start;
+-            }
+-            continue;
+-        }
+-        if (!s.ready && in.dirX != 0) {
+-            CycleCharacter(slot, in.dirX);
+-        }
+-    }
+-}
+-
+ void ResultsInput(const OSContPad* pads) {
+     for (int p = 0; p < sCount; p++) {
+         PadInput in = ReadEdge(p, pads[p]);
+@@ -273,34 +304,6 @@ void RunPending() {
+     switch (action) {
+         case Pending::None:
+             break;
+-        case Pending::Start:
+-            if (!sLobby.active || !sLobby.CanStart() || is_screen_being_faded()) {
+-                break;
+-            }
+-            sCount = sLobby.JoinedCount();
+-            for (int k = 0; k < kMaxPlayers; k++) {
+-                sPorts[k] = k < sCount ? sLobby.slots[k].port : k;
+-                sCharacters[k] = k < sCount ? sLobby.slots[k].character : k;
+-            }
+-            sCommitted = true;
+-            ApplyRoster();
+-            sLeavingLobby = true;
+-            sLobby.active = false;
+-            GameUI::ShowCouchLobby(false);
+-            ClearEdges();
+-            func_8009E1C0(); // on to the course select
+-            play_sound2(SOUND_MENU_OK_CLICKED);
+-            break;
+-        case Pending::Back:
+-            if (!sLobby.active || is_screen_being_faded()) {
+-                break;
+-            }
+-            sLeavingLobby = true;
+-            sLobby.active = false;
+-            GameUI::ShowCouchLobby(false);
+-            func_8009E208(); // back to the main menu
+-            play_sound2(SOUND_MENU_GO_BACK);
+-            break;
+         case Pending::Result:
+             if (!sResults.active) {
+                 break;
+@@ -328,31 +331,6 @@ void RunPending() {
+ 
+ } // namespace
+ 
+-int Lobby::JoinedCount() const {
+-    int n = 0;
+-    for (const Slot& s : slots) {
+-        n += s.joined ? 1 : 0;
+-    }
+-    return n;
+-}
+-
+-bool Lobby::AllReady() const {
+-    for (const Slot& s : slots) {
+-        if (s.joined && !s.ready) {
+-            return false;
+-        }
+-    }
+-    return true;
+-}
+-
+-bool Lobby::CanStart() const {
+-    return JoinedCount() >= 2 && AllReady();
+-}
+-
+-Lobby& GetLobby() {
+-    return sLobby;
+-}
+-
+ Results& GetResults() {
+     return sResults;
+ }
+@@ -373,35 +351,11 @@ bool UniqueCharacters() {
+     return CVarGetInteger("gUniqueCharacterSelections", true) != 0;
+ }
+ 
+-void StartRace() {
+-    sPending = Pending::Start;
+-}
+-
+-void LeaveLobby() {
+-    sPending = Pending::Back;
+-}
+-
+ void ChooseResult(int option) {
+     sPendingResult = std::clamp(option, 0, kNumResultOptions - 1);
+     sPending = Pending::Result;
+ }
+ 
+-void CycleCharacter(int slot, int dir) {
+-    if (slot < 0 || slot >= kMaxPlayers || !sLobby.slots[slot].joined) {
+-        return;
+-    }
+-    Slot& s = sLobby.slots[slot];
+-    int c = s.character;
+-    for (int tries = 0; tries < 8; tries++) {
+-        c = (c + (dir > 0 ? 1 : 7)) & 7;
+-        if (!CharacterTaken(c, slot)) {
+-            s.character = c;
+-            play_sound2(SOUND_MENU_CURSOR_MOVE);
+-            return;
+-        }
+-    }
+-}
+-
+ } // namespace Couch
+ 
+ using namespace Couch;
+@@ -440,36 +394,17 @@ extern "C" void couch_menu_tick(void) {
+         return;
+     }
+ 
+-    bool onMenus = gGamestate < RACING;
+-    bool lobby = onMenus && gMenuSelection == CHARACTER_SELECT_MENU;
+-    if (!lobby) {
+-        sLeavingLobby = false;
+-    }
+-    if (lobby && !sLobby.active && !sLeavingLobby) {
+-        // Coming from the main menu: a fresh roster. From "change drivers":
+-        // keep everyone, but they ready up again.
+-        if (!sCommitted) {
+-            sLobby = Lobby{};
+-        }
+-        for (Slot& s : sLobby.slots) {
+-            s.ready = false;
+-        }
+-        sLobby.active = true;
+-        sCommitted = false;
+-        ClearEdges();
+-        GameUI::ShowCouchLobby(true);
+-    } else if (!lobby && sLobby.active) {
+-        sLobby.active = false;
+-        GameUI::ShowCouchLobby(false);
++    bool select = gGamestate < RACING && gMenuSelection == CHARACTER_SELECT_MENU;
++    if (sOnSelect && !select && gGamestate < RACING && gMenuSelection == COURSE_SELECT_MENU) {
++        CommitRoster(); // picked: on to the course select
++        ApplyRoster();
+     }
++    sOnSelect = select;
+     if (sResults.active && gGamestate != RACING) {
+         sResults.active = false;
+         GameUI::ShowCouchResults(false);
+     }
+-    // Closed with the window's X: they're needed to carry on, so back they come.
+-    if (sLobby.active) {
+-        GameUI::ShowCouchLobby(true);
+-    }
++    // Closed with the window's X: it's needed to carry on, so back it comes.
+     if (sResults.active) {
+         GameUI::ShowCouchResults(true);
+     }
+@@ -480,13 +415,8 @@ extern "C" void couch_filter_pads(OSContPad* pads) {
+     if (!gCouchParty) {
+         return;
+     }
+-    if (sLobby.active) {
+-        if (sPrimeEdges || is_screen_being_faded()) {
+-            PrimeEdges(pads); // fading in: just track what's held
+-        } else {
+-            LobbyInput(pads);
+-        }
+-        std::memset(pads, 0, sizeof(OSContPad) * MAXCONTROLLERS);
++    if (couch_select_active()) {
++        SelectInput(pads);
+         return;
+     }
+     if (!sCommitted) {
+@@ -526,13 +456,30 @@ extern "C" void couch_on_setup_race(void) {
+     GameUI::ShowCouchResults(false);
+ }
+ 
++// load_menu_states() is also called with the "from quit" numbers 1-3.
++static s32 NormalizeMenu(s32 menuSelection) {
++    switch (menuSelection) {
++        case MAIN_MENU_FROM_QUIT:
++            return MAIN_MENU;
++        case PLAYER_SELECT_MENU_FROM_QUIT:
++            return CHARACTER_SELECT_MENU;
++        case COURSE_SELECT_MENU_FROM_QUIT:
++            return COURSE_SELECT_MENU;
++        default:
++            return menuSelection;
++    }
++}
++
+ extern "C" void couch_on_load_menu(s32 menuSelection) {
+     if (!gCouchParty) {
+         return;
+     }
+-    switch (menuSelection) {
+-        case MAIN_MENU:
++    switch (NormalizeMenu(menuSelection)) {
+         case CHARACTER_SELECT_MENU:
++            // From the main menu: start again with just player 1.
++            sFreshSelect = (gGamestate == 0) && (gMenuFadeType == MENU_FADE_TYPE_MAIN);
++            [[fallthrough]];
++        case MAIN_MENU:
+         case COURSE_SELECT_MENU:
+             // Back on the menus: the couch column again (races run as 1P).
+             gPlayerCount = COUCH_MENU_PLAYER_COUNT;
+@@ -545,6 +492,38 @@ extern "C" void couch_on_load_menu(s32 menuSelection) {
+     }
+ }
+ 
++extern "C" void couch_on_menu_loaded(s32 menuSelection) {
++    if (!gCouchParty || NormalizeMenu(menuSelection) != CHARACTER_SELECT_MENU) {
++        return;
++    }
++    sCommitted = false; // choosing again; the roster is committed on the way out
++    sRawPrev.fill(0xFFFF); // buttons held coming in don't count as presses
++    if (sFreshSelect) {
++        FreshRoster();
++        return;
++    }
++    // Back from the course select or a race: same players, cursors where they were.
++    bool locked = gPlayerSelectMenuSelection == PLAYER_SELECT_MENU_OK_GO_BACK;
++    for (int k = 0; k < kMaxPlayers; k++) {
++        bool joined = sSlotPort[k] >= 0;
++        if (!joined) {
++            gCharacterGridSelections[k] = 0;
++        } else if (gCharacterGridSelections[k] == 0) {
++            gCharacterGridSelections[k] = 1;
++        }
++        gCharacterGridIsSelected[k] = joined && locked;
++        sWaitRelease[k] = joined;
++    }
++}
++
++extern "C" bool couch_select_active(void) {
++    return gCouchParty && gGamestate < RACING && gMenuSelection == CHARACTER_SELECT_MENU;
++}
++
++extern "C" bool couch_select_can_finish(void) {
++    return !couch_select_active() || JoinedCount() >= 2;
++}
++
+ extern "C" bool couch_versus_finished(s32 playerId) {
+     if (std::find(sFinishOrder.begin(), sFinishOrder.end(), playerId) == sFinishOrder.end()) {
+         sFinishOrder.push_back(playerId);
+diff --git a/src/port/couch/CouchParty.h b/src/port/couch/CouchParty.h
+index 102c1d9..3517b9f 100644
+--- a/src/port/couch/CouchParty.h
++++ b/src/port/couch/CouchParty.h
+@@ -1,6 +1,6 @@
+ #pragma once
+ 
+-// C++ side of Couch Party (see couch.h), shared with the lobby and results UI.
++// C++ side of Couch Party (see couch.h), shared with the results UI.
+ 
+ #include <array>
+ #include <cstdint>
+@@ -10,21 +10,6 @@ namespace Couch {
+ 
+ constexpr int kMaxPlayers = 8;
+ 
+-struct Slot {
+-    bool joined = false;
+-    int port = -1;      // controller port (0-based) this player uses
+-    int character = 0;  // 0..7
+-    bool ready = false;
+-};
+-
+-struct Lobby {
+-    bool active = false;                // the lobby is on screen
+-    std::array<Slot, kMaxPlayers> slots; // P1..P8, joined players first
+-    int JoinedCount() const;
+-    bool AllReady() const;
+-    bool CanStart() const;
+-};
+-
+ struct Standing {
+     int player = 0;    // 0-based player number
+     int character = 0;
+@@ -40,7 +25,6 @@ struct Results {
+     int cursor = 0;
+ };
+ 
+-Lobby& GetLobby();
+ Results& GetResults();
+ // 1st places this session (reset when the couch party is left).
+ int Wins(int player);
+@@ -48,10 +32,7 @@ bool IsBattle();
+ const char* CharacterName(int character);
+ bool UniqueCharacters();
+ 
+-// Actions (also used by mouse/keyboard in the UI).
+-void StartRace();
+-void LeaveLobby();
++// Results choice (also used by the mouse in the UI).
+ void ChooseResult(int option);
+-void CycleCharacter(int slot, int dir);
+ 
+ } // namespace Couch
+diff --git a/src/port/couch/couch.h b/src/port/couch/couch.h
+index 07055fb..5519fe6 100644
+--- a/src/port/couch/couch.h
++++ b/src/port/couch/couch.h
+@@ -4,8 +4,8 @@
+ // Couch Party: VS races and Battles for up to 8 players on one PC.
+ //
+ // The main menu's third column ("COUCH PARTY", replacing 3P and 4P) offers VS
+-// and Battle. The character screen becomes a lobby where each controller
+-// presses A to join and picks a character. The race itself is a single-screen
++// and Battle. On the stock character screen each controller presses A to
++// join, getting its own cursor (up to 8), and picks a character. The race itself is a single-screen
+ // (1P) race in VS or Battle mode with every joined player switched to human,
+ // drawn with one view per player using the Local Multiplayer split-screen
+ // settings (localplay/), the same way the 8-player Grand Prix is.
+@@ -38,9 +38,14 @@ bool couch_owns_big_race(void);
+ 
+ // Hooks.
+ void couch_menu_tick(void);                // every frame (Game.cpp)
+-void couch_filter_pads(OSContPad* pads);   // read_controllers: lobby/results input, controller order
++void couch_filter_pads(OSContPad* pads);   // read_controllers: joining, results input, controller order
+ void couch_on_setup_race(void);            // setup_race(), after gPlayerCountSelection1 is set
+-void couch_on_load_menu(s32 menuSelection); // load_menu_states()
++void couch_on_load_menu(s32 menuSelection);   // start of load_menu_states()
++void couch_on_menu_loaded(s32 menuSelection); // end of load_menu_states()
++// On the character screen in a couch party (up to 8 cursors).
++bool couch_select_active(void);
++// The character screen may move on (at least 2 players have joined).
++bool couch_select_can_finish(void);
+ // A human crossed the line on the last lap in VS. Returns true when the race
+ // is over (every player but one has finished).
+ bool couch_versus_finished(s32 playerId);
+diff --git a/src/port/localplay/localplay_render.c b/src/port/localplay/localplay_render.c
+index f1cdb29..cb739e0 100644
+--- a/src/port/localplay/localplay_render.c
++++ b/src/port/localplay/localplay_render.c
+@@ -13,6 +13,7 @@
+ #include "code_80057C60.h"
+ #include "racing/skybox_and_splitscreen.h"
+ #include "port/netplay/netrace.h"
++#include "port/couch/couch.h"
+ #include "localplay.h"
+ #include "localplay_internal.h"
+ 
+@@ -33,7 +34,8 @@ bool localplay_views_active(void) {
+ void localplay_feed_extra_pads(const OSContPad* pads) {
+     s32 i;
+ 
+-    if (!gNetLocalViews) {
++    // Also on the Couch Party character screen, where players 5-8 move cursors.
++    if (!gNetLocalViews && !gCouchParty) {
+         return;
+     }
+     for (i = 4; i < NETRACE_MAX_HUMANS; i++) {
+diff --git a/src/port/ui/CouchWindow.cpp b/src/port/ui/CouchWindow.cpp
+index 70cf848..54ace94 100644
+--- a/src/port/ui/CouchWindow.cpp
++++ b/src/port/ui/CouchWindow.cpp
+@@ -7,9 +7,7 @@
+ 
+ #include "ship/Context.h"
+ #include "ship/window/gui/Gui.h"
+-#include "LocalPlayWindow.h"
+ #include "port/couch/CouchParty.h"
+-#include "port/localplay/LocalPlaySettings.h"
+ 
+ extern "C" {
+ #include "main.h"
+@@ -20,7 +18,6 @@ namespace GameUI {
+ 
+ namespace {
+ 
+-const char* const kLobbyName = "Couch Party";
+ const char* const kResultsName = "Couch Party Results";
+ const ImVec4 kGold(1.0f, 0.84f, 0.2f, 1.0f);
+ const ImVec4 kGreen(0.45f, 0.9f, 0.45f, 1.0f);
+@@ -61,138 +58,14 @@ std::string Ordinal(size_t n) {
+     return std::to_string(n) + suffix;
+ }
+ 
+-std::string ModeLine() {
+-    if (Couch::IsBattle()) {
+-        return "BATTLE";
+-    }
+-    static const char* kCC[] = { "50cc", "100cc", "150cc", "Extra" };
+-    return std::string("VS  ") + kCC[std::clamp<int>(gCCSelection, 0, 3)];
+-}
+-
+-void CenterOnAppear(float widthFrac, float heightFrac) {
+-    ImVec2 vp = ImGui::GetMainViewport()->Size;
+-    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+-    ImVec2 size(std::max(560.0f, vp.x * widthFrac), std::max(380.0f, vp.y * heightFrac));
+-    ImGui::SetWindowSize(size, ImGuiCond_Appearing);
+-    ImGui::SetWindowPos(ImVec2(center.x - size.x / 2, center.y - size.y / 2), ImGuiCond_Appearing);
+-}
+ 
+-// A player's tile in the lobby grid.
+-void DrawSlot(int index, const Couch::Slot& slot, ImVec2 a, ImVec2 b) {
+-    ImDrawList* dl = ImGui::GetWindowDrawList();
+-    const float font = ImGui::GetFontSize();
+-    ImU32 color = kPlayerColors[index];
+-    dl->AddRectFilled(a, b, slot.joined ? IM_COL32(35, 40, 55, 255) : IM_COL32(28, 28, 28, 255), 8.0f);
+-    dl->AddRect(a, b, slot.joined ? color : IM_COL32(80, 80, 80, 255), 8.0f, 0, slot.ready ? 4.0f : 2.0f);
+-
+-    std::string tag = "P" + std::to_string(index + 1);
+-    dl->AddText(nullptr, font * 1.6f, ImVec2(a.x + 10, a.y + 8), slot.joined ? color : IM_COL32(110, 110, 110, 255),
+-                tag.c_str());
+-
+-    auto centered = [&](float y, float size, ImU32 col, const std::string& text) {
+-        ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(size, FLT_MAX, 0.0f, text.c_str());
+-        dl->AddText(nullptr, size, ImVec2((a.x + b.x - ts.x) / 2, y), col, text.c_str());
+-    };
+-    float h = b.y - a.y;
+-    if (!slot.joined) {
+-        centered(a.y + h * 0.45f, font * 1.1f, IM_COL32(150, 150, 150, 255), "Press A to join");
+-        return;
+-    }
+-    std::string name = Couch::CharacterName(slot.character);
+-    centered(a.y + h * 0.36f, font * 1.5f, IM_COL32(255, 255, 255, 255),
+-             slot.ready ? name : "<  " + name + "  >");
+-    std::string pad = "Controller " + std::to_string(slot.port + 1);
+-    centered(a.y + h * 0.62f, font * 0.95f, IM_COL32(170, 170, 170, 255), pad);
+-    if (slot.ready) {
+-        centered(a.y + h * 0.78f, font * 1.2f, IM_COL32(110, 230, 110, 255), "READY!");
+-    } else {
+-        centered(a.y + h * 0.78f, font * 0.95f, IM_COL32(200, 200, 120, 255), "A = ready   B = leave");
+-    }
+-}
+ 
+ } // namespace
+ 
+-void ShowCouchLobby(bool show) {
+-    SetShown(kLobbyName, show);
+-}
+-
+ void ShowCouchResults(bool show) {
+     SetShown(kResultsName, show);
+ }
+ 
+-// ------------------------------------------------------------------ lobby
+-
+-void CouchLobbyWindow::DrawElement() {
+-    Couch::Lobby& lobby = Couch::GetLobby();
+-    CenterOnAppear(0.8f, 0.78f);
+-    if (!lobby.active) {
+-        ImGui::TextColored(kGrey, "Choose COUCH PARTY on the main menu to open the lobby.");
+-        return;
+-    }
+-
+-    ImGui::SetWindowFontScale(1.25f);
+-    ImGui::TextColored(kGold, "COUCH PARTY - %s", ModeLine().c_str());
+-    ImGui::SameLine();
+-    int joined = lobby.JoinedCount();
+-    ImGui::TextColored(kGrey, "   %d / %d players", joined, Couch::kMaxPlayers);
+-    ImGui::SetWindowFontScale(1.0f);
+-    ImGui::Separator();
+-
+-    // 4 x 2 grid of player tiles.
+-    ImVec2 avail = ImGui::GetContentRegionAvail();
+-    float footer = ImGui::GetFrameHeightWithSpacing() * 4.5f + 90.0f;
+-    float gap = 10.0f;
+-    float tileW = (avail.x - gap * 3) / 4;
+-    float tileH = std::max(90.0f, (avail.y - footer - gap) / 2);
+-    ImVec2 origin = ImGui::GetCursorScreenPos();
+-    for (int i = 0; i < Couch::kMaxPlayers; i++) {
+-        int col = i % 4, row = i / 4;
+-        ImVec2 a(origin.x + col * (tileW + gap), origin.y + row * (tileH + gap));
+-        ImVec2 b(a.x + tileW, a.y + tileH);
+-        DrawSlot(i, lobby.slots[i], a, b);
+-        // Mouse: click a joined tile to change character.
+-        ImGui::SetCursorScreenPos(a);
+-        ImGui::PushID(i);
+-        if (ImGui::InvisibleButton("##tile", ImVec2(tileW, tileH), ImGuiButtonFlags_MouseButtonLeft |
+-                                                                        ImGuiButtonFlags_MouseButtonRight) &&
+-            lobby.slots[i].joined && !lobby.slots[i].ready) {
+-            Couch::CycleCharacter(i, ImGui::IsMouseReleased(ImGuiMouseButton_Right) ? -1 : 1);
+-        }
+-        ImGui::PopID();
+-    }
+-    ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + tileH * 2 + gap * 2));
+-
+-    // Status and how to start.
+-    if (joined < 2) {
+-        ImGui::TextColored(kGrey, "Each player presses A on their controller to join (2 to 8 players).");
+-    } else if (!lobby.AllReady()) {
+-        ImGui::TextColored(kGrey, "Left/Right picks a character, A when you're ready.");
+-    } else {
+-        ImGui::TextColored(kGreen, "Everyone's ready - press START!");
+-    }
+-    ImGui::TextColored(kGrey, "B leaves (B with nobody joined goes back). START goes on to the course select.");
+-
+-    ImGui::Spacing();
+-    ImGui::SeparatorText("Split screen");
+-    ImGui::SetNextItemWidth(220.0f);
+-    SplitStyleCombo("##split");
+-    ImGui::SameLine();
+-    ImGui::TextColored(kGrey, "%s", LocalPlay::SpanMonitors() ? "Spanning the ticked monitors"
+-                                                               : "One window (Settings > Local Multiplayer for monitors)");
+-    DrawSplitPreview(std::max(joined, 2), 70.0f);
+-
+-    ImGui::Spacing();
+-    ImGui::BeginDisabled(!lobby.CanStart());
+-    if (ImGui::Button("Start")) {
+-        Couch::StartRace();
+-    }
+-    ImGui::EndDisabled();
+-    ImGui::SameLine();
+-    if (ImGui::Button("Back")) {
+-        Couch::LeaveLobby();
+-    }
+-}
+-
+ // ---------------------------------------------------------------- results
+ 
+ void CouchResultsWindow::DrawElement() {
+diff --git a/src/port/ui/CouchWindow.h b/src/port/ui/CouchWindow.h
+index 73c7885..c34238d 100644
+--- a/src/port/ui/CouchWindow.h
++++ b/src/port/ui/CouchWindow.h
+@@ -4,19 +4,6 @@
+ 
+ namespace GameUI {
+ 
+-// Couch Party lobby: controllers join and pick characters.
+-class CouchLobbyWindow : public Ship::GuiWindow {
+-  public:
+-    using Ship::GuiWindow::GuiWindow;
+-
+-  protected:
+-    void InitElement() override {
+-    }
+-    void DrawElement() override;
+-    void UpdateElement() override {
+-    }
+-};
+-
+ // Couch Party results after a VS race or Battle.
+ class CouchResultsWindow : public Ship::GuiWindow {
+   public:
+@@ -30,7 +17,6 @@ class CouchResultsWindow : public Ship::GuiWindow {
+     }
+ };
+ 
+-void ShowCouchLobby(bool show);
+ void ShowCouchResults(bool show);
+ 
+ } // namespace GameUI
+diff --git a/src/port/ui/ImguiUI.cpp b/src/port/ui/ImguiUI.cpp
+index 0ce1e8c..0c1bf80 100644
+--- a/src/port/ui/ImguiUI.cpp
++++ b/src/port/ui/ImguiUI.cpp
+@@ -48,7 +48,6 @@ std::shared_ptr<Ship::GuiWindow> mLocalPlayWindow;
+ std::shared_ptr<Ship::GuiWindow> mLeaderboardWindow;
+ std::shared_ptr<Ship::GuiWindow> mLeaderboardEntryWindow;
+ std::shared_ptr<Ship::GuiWindow> mTrackRecordsWindow;
+-std::shared_ptr<Ship::GuiWindow> mCouchLobbyWindow;
+ std::shared_ptr<Ship::GuiWindow> mCouchResultsWindow;
+ 
+ void SetupGuiElements() {
+@@ -114,19 +113,13 @@ void SetupGuiElements() {
+         ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings);
+     gui->AddGuiWindow(mLeaderboardEntryWindow);
+ 
+-    // Opened and closed by the game (DATA screens, Couch Party lobby and results).
++    // Opened and closed by the game (DATA screens, Couch Party results).
+     CVarSetInteger("gLeaderboard.RecordsOpen", 0);
+     mTrackRecordsWindow = std::make_shared<TrackRecordsWindow>(
+         "gLeaderboard.RecordsOpen", "Track Records", ImVec2(-1, -1),
+         ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
+             ImGuiWindowFlags_NoFocusOnAppearing);
+     gui->AddGuiWindow(mTrackRecordsWindow);
+-    CVarSetInteger("gCouchParty.LobbyOpen", 0);
+-    mCouchLobbyWindow = std::make_shared<CouchLobbyWindow>(
+-        "gCouchParty.LobbyOpen", "Couch Party", ImVec2(-1, -1),
+-        ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar |
+-            ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
+-    gui->AddGuiWindow(mCouchLobbyWindow);
+     CVarSetInteger("gCouchParty.ResultsOpen", 0);
+     mCouchResultsWindow = std::make_shared<CouchResultsWindow>(
+         "gCouchParty.ResultsOpen", "Couch Party Results", ImVec2(-1, -1),
+@@ -149,7 +142,6 @@ void Destroy() {
+     mLeaderboardWindow = nullptr;
+     mLeaderboardEntryWindow = nullptr;
+     mTrackRecordsWindow = nullptr;
+-    mCouchLobbyWindow = nullptr;
+     mCouchResultsWindow = nullptr;
+ }
+ 
+-- 
+2.43.0
+
