@@ -1,0 +1,278 @@
+From 0a3e1479407ea90a8cc0c38db5debf3ef3a71441 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 29 Oct 2026 17:31:00 +0000
+Subject: [PATCH 14/17] Keep ghost dots on the minimap, show record holders'
+ names, 7-letter names, 7 players per LAN PC
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Qq7B1uqfWVWykYRDDMiuXa
+---
+ docs/LEADERBOARDS.md                     |  7 ++++++-
+ docs/NETPLAY.md                          |  2 +-
+ src/math_util_2.c                        |  5 ++++-
+ src/math_util_2.h                        |  1 +
+ src/menu_items.c                         |  9 ++++++++-
+ src/port/couch/LanSetup.cpp              |  8 ++++----
+ src/port/leaderboard/Leaderboard.h       |  2 +-
+ src/port/leaderboard/LeaderboardGame.cpp | 23 +++++++++++++++++++++++
+ src/port/leaderboard/leaderboard_game.h  |  3 +++
+ src/render_objects.c                     | 19 +++++++++++++++++++
+ src/render_objects.h                     |  1 +
+ 11 files changed, 71 insertions(+), 9 deletions(-)
+
+diff --git a/docs/LEADERBOARDS.md b/docs/LEADERBOARDS.md
+index 22beddc..83f3565 100644
+--- a/docs/LEADERBOARDS.md
++++ b/docs/LEADERBOARDS.md
+@@ -6,7 +6,8 @@ The 10 best Time Trial times for every track, saved on this PC.
+ 
+ Finish a Time Trial. If your time makes the top 10 for that track, the game
+ shows **NEW RECORD!** with your place, time, driver and where you land on the
+-board, drawn in the game's own font. Enter your name with the controller:
++board, drawn in the game's own font. Enter your name (up to 7 letters) with
++the controller:
+ 
+ - **Up/Down** change the letter, **Left/Right** move, **A** next letter
+   (A on the last letter saves), **B** delete.
+@@ -16,6 +17,10 @@ board, drawn in the game's own font. Enter your name with the controller:
+ Your last name is filled in for you. While the entry is up, player 1's
+ controller only types the name, so the results menu behind it waits.
+ 
++Wherever the game shows a best race or best lap time (the course intro,
++the Time Trial results and the DATA screen), it now shows the name of the
++player who set it in place of the driver, if that time is on the board.
++
+ Replays ("watch replay" after a Time Trial) are never recorded. Name entry is
+ also off during LAN netplay, so it can't hold up the other PCs.
+ 
+diff --git a/docs/NETPLAY.md b/docs/NETPLAY.md
+index 796da17..20c8741 100644
+--- a/docs/NETPLAY.md
++++ b/docs/NETPLAY.md
+@@ -12,7 +12,7 @@ controller driven and drawn with the game's own font:
+ - **YOUR ADDRESS** (host) / **HOST ADDRESS** (join, digit by digit with
+   Up/Down, A to edit).
+ - **YOUR NAME:** A to edit, Up/Down letter, Left/Right move, B delete, START done.
+-- **PLAYERS ON THIS PC:** 1–8, each with their own controller (ports 1..n on
++- **PLAYERS ON THIS PC:** 1–7, each with their own controller (ports 1..n on
+   that PC) and their own split-screen view. 8 players in all.
+ - **INPUT DELAY** (host): AUTO or 0–8 frames. **PORT:** 27064.
+ - Host: the panel lists who's in; **START RACE** (or START) when there are 2+.
+diff --git a/src/math_util_2.c b/src/math_util_2.c
+index 86fabc0..199d37a 100644
+--- a/src/math_util_2.c
++++ b/src/math_util_2.c
+@@ -683,12 +683,15 @@ UNUSED void func_800421FC(s32 x, s32 y, f32 scale) {
+               G_MTX_NOPUSH | G_MTX_MUL | G_MTX_MODELVIEW);
+ }
+ 
++// While drawing minimap icons: keep them with the minimap (right-anchored).
++s32 gMinimapIconsRightAnchored = 0;
++
+ void func_80042330(s32 x, s32 y, u16 angle, f32 scale) {
+     Mat4 matrix;
+     // printf("panel %d %d %d\n", x, (s32)OTRGetDimensionFromLeftEdge(x), (s32)OTRGetDimensionFromLeftEdge(0));
+ 
+     if (gHUDModes != 2) {
+-        if (x < (SCREEN_WIDTH / 2)) {
++        if ((x < (SCREEN_WIDTH / 2)) && !gMinimapIconsRightAnchored) {
+             x = (s32) OTRGetDimensionFromLeftEdge(x);
+         } else {
+             x = (s32) OTRGetDimensionFromRightEdge(x);
+diff --git a/src/math_util_2.h b/src/math_util_2.h
+index 29e5d6f..83547b6 100644
+--- a/src/math_util_2.h
++++ b/src/math_util_2.h
+@@ -70,6 +70,7 @@ void mtxf_translation_x_y_rotate_z_scale_x_y(Mat4, s32, s32, u16, f32);
+ void func_80041D24(void);
+ void func_80041D34(void);
+ void set_matrix_hud_screen(void);
++extern s32 gMinimapIconsRightAnchored;
+ void func_80042330(s32, s32, u16, f32);
+ void func_80042330_unchanged(s32 x, s32 y, u16 angle, f32 scale);
+ void func_80042330_portrait(s32, s32, u16, f32, s16);
+diff --git a/src/menu_items.c b/src/menu_items.c
+index 19503dd..c4147a7 100644
+--- a/src/menu_items.c
++++ b/src/menu_items.c
+@@ -8221,7 +8221,14 @@ void render_lap_times(s32 recordType, s32 column, s32 row) {
+     } else {
+         characterId = 8;
+     }
+-    print_text1_center_mode_1(column + 0x78, row, D_800E76A8[characterId], 0, 0.65f, 0.65f);
++    {
++        // Who set it, from the local leaderboards, in place of the driver.
++        const char* who = (characterId < 8) ? leaderboard_record_name((u32) temp_t0, characterId, recordType >= 5,
++                                                                      sp30 != 0)
++                                            : NULL;
++        print_text1_center_mode_1(column + 0x78, row, who ? (char*) who : D_800E76A8[characterId], 0, 0.65f,
++                                  0.65f);
++    }
+ }
+ #else
+ GLOBAL_ASM("asm/non_matchings/menu_items/render_lap_times.s")
+diff --git a/src/port/couch/LanSetup.cpp b/src/port/couch/LanSetup.cpp
+index 7640c4c..4aed004 100644
+--- a/src/port/couch/LanSetup.cpp
++++ b/src/port/couch/LanSetup.cpp
+@@ -34,7 +34,7 @@ enum class Edit { None, Name, Address, Port };
+ // Rows (the list below them, when joining, follows the last row).
+ enum Row { kRowGame, kRowAddress, kRowName, kRowPlayers, kRowDelay, kRowPort, kRowButton, kNumRows };
+ 
+-constexpr int kNameMax = 12;
++constexpr int kNameMax = 7;
+ const char kNameCharset[] = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-.!";
+ 
+ struct State {
+@@ -66,7 +66,7 @@ Netplay::Session& S() {
+ // ---- settings (CVars) ----
+ std::string Name() {
+     std::string n = CVarGetString("gLan.Name", "PLAYER");
+-    return n.empty() ? std::string("PLAYER") : n;
++    return n.empty() ? std::string("PLAYER") : n.substr(0, kNameMax);
+ }
+ uint16_t Port() {
+     return (uint16_t) std::clamp(CVarGetInteger("gLan.Port", Netplay::kDefaultPort), 1024, 65535);
+@@ -75,7 +75,7 @@ std::string HostAddress() {
+     return CVarGetString("gLan.HostAddress", "192.168.1.2");
+ }
+ int LocalPlayers() {
+-    return std::clamp(CVarGetInteger("gLan.LocalPlayers", 1), 1, 8);
++    return std::clamp(CVarGetInteger("gLan.LocalPlayers", 1), 1, 7); // 7: room for at least one more PC
+ }
+ int Delay() { // -1 = auto
+     return std::clamp(CVarGetInteger("gLan.Delay", -1), -1, Netplay::kMaxInputDelay);
+@@ -237,7 +237,7 @@ void Change(int dir) {
+             if (ClientBusy() && S().GetPhase() != Phase::Lobby) {
+                 break;
+             }
+-            int n = std::clamp(LocalPlayers() + dir, 1, 8);
++            int n = std::clamp(LocalPlayers() + dir, 1, 7);
+             CVarSetInteger("gLan.LocalPlayers", n);
+             CVarSave();
+             S().SetLocalCount(n);
+diff --git a/src/port/leaderboard/Leaderboard.h b/src/port/leaderboard/Leaderboard.h
+index 9663085..537545a 100644
+--- a/src/port/leaderboard/Leaderboard.h
++++ b/src/port/leaderboard/Leaderboard.h
+@@ -11,7 +11,7 @@
+ namespace Leaderboard {
+ 
+ constexpr size_t kMaxEntries = 10;  // per track
+-constexpr size_t kMaxNameLength = 12;
++constexpr size_t kMaxNameLength = 7;
+ 
+ struct Entry {
+     std::string name;
+diff --git a/src/port/leaderboard/LeaderboardGame.cpp b/src/port/leaderboard/LeaderboardGame.cpp
+index 407b5df..fea87e8 100644
+--- a/src/port/leaderboard/LeaderboardGame.cpp
++++ b/src/port/leaderboard/LeaderboardGame.cpp
+@@ -353,6 +353,29 @@ extern "C" void leaderboard_filter_pads(OSContPad* pads) {
+     }
+ }
+ 
++// The game's own record lists (results screen and DATA screen) show the
++// driver; show who set the time instead when a leaderboard entry matches.
++extern "C" const char* leaderboard_record_name(u32 timeCs, s32 character, bool lap, bool dataScreen) {
++    static char sName[kMaxNameLength + 1];
++    std::string track = dataScreen ? kDataTracks[std::clamp<int>(gTimeTrialDataCourseIndex, 0, 15)] : CurrentTrack();
++    const Board* board = track.empty() ? nullptr : GetStore().Get(track);
++    if (board == nullptr || timeCs == 0) {
++        return nullptr;
++    }
++    for (const Entry& e : board->entries) {
++        if ((e.character & 7) != (character & 7)) {
++            continue;
++        }
++        bool match = !lap ? e.timeCs == timeCs
++                          : (e.lapsCs[0] == timeCs || e.lapsCs[1] == timeCs || e.lapsCs[2] == timeCs);
++        if (match) {
++            std::snprintf(sName, sizeof(sName), "%s", GameDraw::Printable(e.name).c_str());
++            return sName;
++        }
++    }
++    return nullptr;
++}
++
+ using namespace GameDraw;
+ 
+ // Time Trial record: name entry, drawn over the race.
+diff --git a/src/port/leaderboard/leaderboard_game.h b/src/port/leaderboard/leaderboard_game.h
+index 8d004b5..635ab6d 100644
+--- a/src/port/leaderboard/leaderboard_game.h
++++ b/src/port/leaderboard/leaderboard_game.h
+@@ -21,6 +21,9 @@ void leaderboard_filter_pads(OSContPad* pads);
+ // on the DATA screen.
+ void leaderboard_render_race(void);
+ void leaderboard_render_menus(void);
++// The player's name for one of the game's own records (a race time, or the
++// best lap), if the leaderboard has it; NULL otherwise.
++const char* leaderboard_record_name(u32 timeCs, s32 character, bool lap, bool dataScreen);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/src/render_objects.c b/src/render_objects.c
+index 07901a2..9e37de9 100644
+--- a/src/render_objects.c
++++ b/src/render_objects.c
+@@ -2036,6 +2036,18 @@ void draw_hud_2d_texture_wide(s32 x, s32 y, u32 width, u32 height, u8* texture)
+     gDPSetTextureFilter(gDisplayListHead++, G_TF_BILERP);
+ }
+ 
++// Like draw_hud_2d_texture_wide, but positioned the way the minimap is.
++void draw_hud_2d_texture_minimap(s32 x, s32 y, u32 width, u32 height, u8* texture) {
++    gSPDisplayList(gDisplayListHead++, D_0D008108);
++    gSPDisplayList(gDisplayListHead++, D_0D007EF8);
++    gDPSetTextureFilter(gDisplayListHead++, G_TF_POINT);
++    gDPSetAlphaCompare(gDisplayListHead++, G_AC_THRESHOLD);
++    load_texture_block_rgba16_mirror(texture, width, height);
++    func_8004B97C_wide(x - (width >> 1), y - (height >> 1), width, height, 1);
++    gSPDisplayList(gDisplayListHead++, D_0D007EB8);
++    gDPSetTextureFilter(gDisplayListHead++, G_TF_BILERP);
++}
++
+ void func_8004C450(s32 arg0, s32 arg1, u32 arg2, u32 arg3, u8* texture) {
+ 
+     gSPDisplayList(gDisplayListHead++, D_0D007F38);
+@@ -2619,6 +2631,7 @@ void draw_minimap_character(s32 arg0, s32 playerId, s32 characterId) {
+     Player* player = &gPlayerOne[playerId];
+ 
+     if (player->type & (1 << 15)) {
++        gMinimapIconsRightAnchored = (gScreenModeSelection != SCREEN_MODE_3P_4P_SPLITSCREEN);
+         thing0 = player->pos[0] * CM_GetProps()->Minimap.PlayerScaleFactor; // gMinimapPlayerScale;
+         thing1 = player->pos[2] * CM_GetProps()->Minimap.PlayerScaleFactor; // gMinimapPlayerScale;
+ 
+@@ -2648,11 +2661,17 @@ void draw_minimap_character(s32 arg0, s32 playerId, s32 characterId) {
+             FrameInterpolation_RecordOpenChild("minimap_dots2", TAG_MINIMAP_DOTS( ((arg0 & 0x1) << 6) | ((playerId & 0x7) << 3) | (characterId & 0x7) ));
+             if (gGPCurrentRaceRankByPlayerId[playerId] == 0) {
+                 func_8004C450(x, y, 8, 8, (u8*) common_texture_minimap_progress[player->characterId]);
++            } else if (gScreenModeSelection != SCREEN_MODE_3P_4P_SPLITSCREEN) {
++                // Ghosts and CPU dots: placed like the minimap itself (stuck to the right
++                // edge on wide screens). The general HUD path stuck dots left of the
++                // middle of the screen to the left edge, so they wandered off the map.
++                draw_hud_2d_texture_minimap(x, y, 8, 8, (u8*) common_texture_minimap_progress[player->characterId]);
+             } else {
+                 draw_hud_2d_texture_wide(x, y, 8, 8, (u8*) common_texture_minimap_progress[player->characterId]);
+             }
+             FrameInterpolation_RecordCloseChild();
+         }
++        gMinimapIconsRightAnchored = 0;
+     }
+ }
+ #else
+diff --git a/src/render_objects.h b/src/render_objects.h
+index 175943e..2cf0b14 100644
+--- a/src/render_objects.h
++++ b/src/render_objects.h
+@@ -219,6 +219,7 @@ void func_8004C354(void);
+ void func_8004C35C(void);
+ void draw_hud_2d_texture(s32, s32, u32, u32, u8*);
+ void draw_hud_2d_texture_wide(s32, s32, u32, u32, u8*);
++void draw_hud_2d_texture_minimap(s32, s32, u32, u32, u8*);
+ void func_8004C450(s32, s32, u32, u32, u8*);
+ void func_8004C53C(s32, s32, u32, u32, u8*);
+ void func_8004C628(s32, s32, u32, u32, u8*);
+-- 
+2.43.0
+

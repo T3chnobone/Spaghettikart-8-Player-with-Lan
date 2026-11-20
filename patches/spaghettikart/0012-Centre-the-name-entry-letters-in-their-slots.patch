@@ -1,0 +1,64 @@
+From a3984d70473257854390ab4178aa56966cdabcb8 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 29 Oct 2026 15:57:53 +0000
+Subject: [PATCH 12/17] Centre the name-entry letters in their slots
+
+The game's letters draw a few pixels right of their measured width.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Qq7B1uqfWVWykYRDDMiuXa
+---
+ src/port/couch/LanSetup.cpp              | 6 +++---
+ src/port/leaderboard/LeaderboardGame.cpp | 5 ++++-
+ 2 files changed, 7 insertions(+), 4 deletions(-)
+
+diff --git a/src/port/couch/LanSetup.cpp b/src/port/couch/LanSetup.cpp
+index b401061..7640c4c 100644
+--- a/src/port/couch/LanSetup.cpp
++++ b/src/port/couch/LanSetup.cpp
+@@ -616,7 +616,7 @@ extern "C" void lan_setup_render(void) {
+                 if (i == sState.editCursor) {
+                     Box(cx - 1, y + 2, cx + 7, y + 14, 255, 225, 74, 255);
+                 }
+-                Text(cx, y + 12, d, i == sState.editCursor ? TEXT_RED : TEXT_GREEN, 0.6f);
++                Text(cx - 2, y + 12, d, i == sState.editCursor ? TEXT_RED : TEXT_GREEN, 0.6f); // letters lean right
+                 cx += 8;
+                 if (i % 3 == 2 && i < 11) {
+                     Text(cx, y + 12, ".", TEXT_GREEN, 0.6f);
+@@ -642,7 +642,7 @@ extern "C" void lan_setup_render(void) {
+                     Box(cx, y + 13, cx + 7, y + 14, 127, 216, 255, 255);
+                 }
+                 if (c != ' ') {
+-                    Text(cx, y + 12, std::string(1, c), i == sState.editCursor ? TEXT_RED : TEXT_BLUE, 0.6f);
++                    Text(cx - 2, y + 12, std::string(1, c), i == sState.editCursor ? TEXT_RED : TEXT_BLUE, 0.6f);
+                 }
+                 cx += 10;
+             }
+@@ -683,7 +683,7 @@ extern "C" void lan_setup_render(void) {
+                 if (i == sState.editCursor) {
+                     Box(cx - 1, y + 2, cx + 7, y + 14, 255, 225, 74, 255);
+                 }
+-                Text(cx, y + 12, std::string(1, (char) ('0' + sState.portDigits[i])),
++                Text(cx - 2, y + 12, std::string(1, (char) ('0' + sState.portDigits[i])),
+                      i == sState.editCursor ? TEXT_RED : TEXT_GREEN, 0.6f);
+                 cx += 8;
+             }
+diff --git a/src/port/leaderboard/LeaderboardGame.cpp b/src/port/leaderboard/LeaderboardGame.cpp
+index 7b1a7cc..407b5df 100644
+--- a/src/port/leaderboard/LeaderboardGame.cpp
++++ b/src/port/leaderboard/LeaderboardGame.cpp
+@@ -380,7 +380,10 @@ extern "C" void leaderboard_render_race(void) {
+         }
+         Box(x, baseY + 3, x + slotW - 2, baseY + 5, cur ? 255 : 127, cur ? 225 : 216, cur ? 74 : 255, 255);
+         if ((size_t) i < len && p.name[i] != ' ') {
+-            TextCentered(x + (slotW - 2) / 2, baseY, std::string(1, p.name[i]), cur ? TEXT_YELLOW : TEXT_GREEN, 0.75f);
++            // The game's letters are drawn about 3 pixels right of where their width
++            // says (they lean), so nudge them back to sit in the middle of the slot.
++            TextCentered(x + (slotW - 2) / 2 - 3, baseY - 1, std::string(1, p.name[i]), cur ? TEXT_YELLOW : TEXT_GREEN,
++                         0.75f);
+         }
+     }
+     Text(110, 116, "DRIVER", TEXT_YELLOW, 0.5f);
+-- 
+2.43.0
+

@@ -1,0 +1,135 @@
+From 208023875b7371b81858e33e12ca903ac84907e6 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 28 Oct 2026 21:08:00 +0000
+Subject: [PATCH 10/17] Couch Party: picked portraits move to each player's
+ split-screen spot
+
+Once everyone has picked, each portrait moves to the centre of where that
+player's view will be (from the split-screen setting and monitors) instead
+of the stock 1-4 player spots. Also stops players 5-8 reading past the
+stock position table.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Qq7B1uqfWVWykYRDDMiuXa
+---
+ docs/COUCH_PARTY.md           |  3 ++-
+ src/menu_items.c              | 20 ++++++++++++++++++--
+ src/port/couch/CouchParty.cpp | 21 +++++++++++++++++++++
+ src/port/couch/couch.h        |  3 +++
+ 4 files changed, 44 insertions(+), 3 deletions(-)
+
+diff --git a/docs/COUCH_PARTY.md b/docs/COUCH_PARTY.md
+index b7968cf..748c011 100644
+--- a/docs/COUCH_PARTY.md
++++ b/docs/COUCH_PARTY.md
+@@ -15,7 +15,8 @@ VS races and Battles for 2 to 8 people on one PC, each with their own view.
+    - **B** before picking makes a joined player (2P–8P) leave again; player
+      1's B goes back to the main menu, as usual.
+    - When at least 2 players have joined and everyone has picked, **OK?**
+-     appears: A goes on.
++     appears and each picked character moves to where that player's view
++     will be on the split screen. A goes on.
+ 3. Player 1 picks the cup and course, as usual.
+ 4. Everyone gets their own view and HUD, arranged by the **Split screen**
+    setting (Settings → Local Multiplayer, where the monitors are too). Each
+diff --git a/src/menu_items.c b/src/menu_items.c
+index 1248e7f..0e884c2 100644
+--- a/src/menu_items.c
++++ b/src/menu_items.c
+@@ -10668,6 +10668,22 @@ void func_800AAB90(MenuItem* arg0) {
+     }
+ }
+ 
++// Where a picked character's portrait goes once everyone has picked. Stock:
++// the 1-4 player spots. Couch Party: where that player's view will be on the
++// split screen, so everyone can see where they'll be racing.
++static Unk_D_800E70A0* couch_or_stock_portrait_spot(s32 playerIdx) {
++    static Unk_D_800E70A0 sSpot;
++    s32 column;
++    s32 row;
++
++    if (gCouchParty && couch_portrait_spot(playerIdx, &column, &row)) {
++        sSpot.column = (s16) column;
++        sSpot.row = (s16) row;
++        return &sSpot;
++    }
++    return &D_800E7188[(gScreenModeSelection * 4) + (playerIdx & 3)];
++}
++
+ void func_800AAC18(MenuItem* arg0) {
+     UNUSED s32 stackPadding0;
+     UNUSED s32 stackPadding1;
+@@ -10682,7 +10698,7 @@ void func_800AAC18(MenuItem* arg0) {
+             if (gPlayerSelectMenuSelection == 3) {
+                 temp_v0 = func_800AAFCC(temp_a1);
+                 if (temp_v0 >= 0) {
+-                    var_t0 = &D_800E7188[(gScreenModeSelection * 4) + temp_v0];
++                    var_t0 = couch_or_stock_portrait_spot(temp_v0);
+                     arg0->column = (s32) var_t0->column;
+                     arg0->row = (s32) var_t0->row;
+                     arg0->state = 2;
+@@ -10702,7 +10718,7 @@ void func_800AAC18(MenuItem* arg0) {
+             if (arg0->state == 2) {
+                 temp_v0 = func_800AAFCC(temp_a1);
+                 if (temp_v0 >= 0) {
+-                    var_t0 = &D_800E7188[(gScreenModeSelection * 4) + temp_v0];
++                    var_t0 = couch_or_stock_portrait_spot(temp_v0);
+                 }
+             } else {
+                 var_t0 = &D_800E7108[0][temp_a1];
+diff --git a/src/port/couch/CouchParty.cpp b/src/port/couch/CouchParty.cpp
+index 1372804..2c50498 100644
+--- a/src/port/couch/CouchParty.cpp
++++ b/src/port/couch/CouchParty.cpp
+@@ -11,6 +11,7 @@
+ 
+ #include <libultraship/libultraship.h>
+ #include "port/netplay/NetplayCore.h"
++#include "port/localplay/LocalPlaySettings.h"
+ 
+ extern "C" {
+ #include "main.h"
+@@ -535,6 +536,26 @@ extern "C" bool couch_select_active(void) {
+     return gCouchParty && gGamestate < RACING && gMenuSelection == CHARACTER_SELECT_MENU;
+ }
+ 
++extern "C" bool couch_portrait_spot(s32 playerIdx, s32* column, s32* row) {
++    int count = JoinedCount();
++    if (playerIdx < 0 || playerIdx >= count || count < 1) {
++        return false;
++    }
++    std::vector<LocalPlay::Rect> views = LocalPlay::CurrentLayout(count);
++    if (playerIdx >= (int) views.size()) {
++        return false;
++    }
++    // The views fill the window; the menus use the 320x240 picture inside it.
++    const LocalPlay::Rect& v = views[playerIdx];
++    const float kW = 320.0f, kH = 240.0f;
++    const int kPortraitW = 64, kPortraitH = 76;
++    int x = (int) ((v.x + v.w * 0.5f) * kW) - kPortraitW / 2;
++    int y = (int) ((v.y + v.h * 0.5f) * kH) - kPortraitH / 2;
++    *column = std::clamp(x, 0, (int) kW - kPortraitW);
++    *row = std::clamp(y, 0, (int) kH - kPortraitH);
++    return true;
++}
++
+ extern "C" bool couch_select_can_finish(void) {
+     return !couch_select_active() || JoinedCount() >= 2;
+ }
+diff --git a/src/port/couch/couch.h b/src/port/couch/couch.h
+index 5519fe6..aa845b4 100644
+--- a/src/port/couch/couch.h
++++ b/src/port/couch/couch.h
+@@ -46,6 +46,9 @@ void couch_on_menu_loaded(s32 menuSelection); // end of load_menu_states()
+ bool couch_select_active(void);
+ // The character screen may move on (at least 2 players have joined).
+ bool couch_select_can_finish(void);
++// Top-left (N64 screen coordinates) for player `playerIdx`'s portrait once
++// everyone has picked: centred on where their split-screen view will be.
++bool couch_portrait_spot(s32 playerIdx, s32* column, s32* row);
+ // A human crossed the line on the last lap in VS. Returns true when the race
+ // is over (every player but one has finished).
+ bool couch_versus_finished(s32 playerId);
+-- 
+2.43.0
+

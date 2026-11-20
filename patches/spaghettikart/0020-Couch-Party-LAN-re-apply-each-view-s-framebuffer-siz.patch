@@ -1,0 +1,41 @@
+From 7559ddd668f94568e009f52dc1899944f5cc0ee4 Mon Sep 17 00:00:00 2001
+From: T3chnobone <98963290+T3chnobone@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 11:32:18 +0000
+Subject: [PATCH] Couch Party / LAN: re-apply each view's framebuffer size
+ every frame
+
+If the window size changed after a view's framebuffer was sized (going
+fullscreen, resizing), the renderer reset it to 320x240 while the game kept
+its cached size and pasted it as if it were full size: every view showed
+only sky. Pairs with libultraship patch 0002.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Qq7B1sWVXKm11Pn2wqQeQQ
+---
+ src/port/localplay/localplay_render.c | 10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/src/port/localplay/localplay_render.c b/src/port/localplay/localplay_render.c
+index 6e9b88b76..ecd2df97c 100644
+--- a/src/port/localplay/localplay_render.c
++++ b/src/port/localplay/localplay_render.c
+@@ -88,11 +88,11 @@ static s32 ensure_view_fb(s32 v, u32 width, u32 height) {
+         sViewFb[v] = gfx_create_framebuffer(SCREEN_WIDTH, SCREEN_HEIGHT, SCREEN_WIDTH, SCREEN_HEIGHT, false, false);
+         sViewFbW[v] = sViewFbH[v] = 0;
+     }
+-    if (width != sViewFbW[v] || height != sViewFbH[v]) {
+-        gfx_set_framebuffer_pixel_size(sViewFb[v], width, height);
+-        sViewFbW[v] = width;
+-        sViewFbH[v] = height;
+-    }
++    // Every frame: the renderer only does work when the size really changed, and this
++    // puts the size back if anything else (a window resize) changed it.
++    gfx_set_framebuffer_pixel_size(sViewFb[v], width, height);
++    sViewFbW[v] = width;
++    sViewFbH[v] = height;
+     return sViewFb[v];
+ }
+ 
+-- 
+2.43.0
+

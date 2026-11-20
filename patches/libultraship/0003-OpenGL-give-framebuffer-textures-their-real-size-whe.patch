@@ -1,0 +1,39 @@
+From f5d18559c7ce3532118ad295550944c5bbbabf9f Mon Sep 17 00:00:00 2001
+From: T3chnobone <98963290+T3chnobone@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 13:01:51 +0000
+Subject: [PATCH] OpenGL: give framebuffer textures their real size when
+ sampled
+
+The shader reads each texture's size from the backend's texture table
+(three-point filtering and clamping divide by it). Framebuffer colour
+buffers never go through UploadTexture, so their entry stayed 0x0 and
+sampling a framebuffer read outside the picture. Split-screen views
+composed from framebuffers showed only a smear of sky on OpenGL; DirectX
+11 already tracks the real size.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Qq7B1sWVXKm11Pn2wqQeQQ
+---
+ src/fast/backends/gfx_opengl.cpp | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/src/fast/backends/gfx_opengl.cpp b/src/fast/backends/gfx_opengl.cpp
+index ad9b1dde..9ebdcc14 100644
+--- a/src/fast/backends/gfx_opengl.cpp
++++ b/src/fast/backends/gfx_opengl.cpp
+@@ -920,6 +920,12 @@ void GfxRenderingAPIOGL::SelectTextureFb(int fb_id) {
+     if (texId >= textures.size()) {
+         textures.resize((size_t)texId + 1);
+     }
++    // The shader reads the texture's size from here (three-point filtering and clamping
++    // divide by it). FB colour buffers never go through UploadTexture, so it stayed 0x0:
++    // sampling a framebuffer then read outside the picture. Couch Party's split-screen
++    // views showed only a smear of sky on OpenGL; DirectX 11 has the real size.
++    textures[texId].width = (int)mFrameBuffers[fb_id].width;
++    textures[texId].height = (int)mFrameBuffers[fb_id].height;
+     SelectTexture(tile, texId);
+ }
+ 
+-- 
+2.43.0
+

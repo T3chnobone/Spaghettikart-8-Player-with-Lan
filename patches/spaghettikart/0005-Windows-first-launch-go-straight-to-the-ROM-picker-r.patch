@@ -1,0 +1,70 @@
+From bc7ff19dfca3bab59b07ae3dabf2ec65ea52174c Mon Sep 17 00:00:00 2001
+From: T3chnobone <98963290+T3chnobone@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 16:10:30 +0000
+Subject: [PATCH 05/17] Windows first launch: go straight to the ROM picker,
+ report in console
+
+On Windows, skip the "Generate one now?" and "Found ... extraction will now
+begin" message boxes before extraction (they could end up hidden behind the
+game window, making the first launch look frozen). Open the ROM file picker
+directly and print what's happening to the console instead.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Qq7B1uqfWVWykYRDDMiuXa
+---
+ src/engine/mods/ModManager.cpp |  8 ++++++++
+ src/port/Engine.cpp            | 15 ++++++++++++++-
+ 2 files changed, 22 insertions(+), 1 deletion(-)
+
+diff --git a/src/engine/mods/ModManager.cpp b/src/engine/mods/ModManager.cpp
+index ff2a2b3..55326b3 100644
+--- a/src/engine/mods/ModManager.cpp
++++ b/src/engine/mods/ModManager.cpp
+@@ -58,7 +58,15 @@ void UnloadMods() {
+ // at this point, which segfaults — a crash report on what should be a clean quit (e.g. when
+ // the user declines the first-run "Generate one now?" prompt).
+ void GenerateAssetsMods() {
++#ifdef _WIN32
++    // Go straight to the ROM picker: a question box here can end up hidden
++    // behind the game window, which looks like a freeze on first launch.
++    printf("\n*** First launch: choose your Mario Kart 64 ROM (.z64) in the window that opens. ***\n\n");
++    fflush(stdout);
++    if (true) {
++#else
+     if (GameEngine::ShowYesNoBox("No O2R Files", "No O2R files found. Generate one now?") == IDYES) {
++#endif
+         if (!GameEngine::GenAssetFile()) {
+             GameEngine::ShowMessage("Error", "An error occured, no O2R file was generated.\n\nExiting...");
+             _Exit(1);
+diff --git a/src/port/Engine.cpp b/src/port/Engine.cpp
+index edf7ca7..47cfd02 100644
+--- a/src/port/Engine.cpp
++++ b/src/port/Engine.cpp
+@@ -287,10 +287,23 @@ bool GameEngine::GenAssetFile() {
+         _Exit(1);
+     }
+ 
++#ifdef _WIN32
++    // No OK box to click (it could hide behind the game window); say it in the console.
++    printf("\n*** Found %s. Extracting game data - this takes a minute or two. ***\n"
++           "*** The game window may say \"Not responding\" until it finishes. ***\n\n",
++           game.value().c_str());
++    fflush(stdout);
++#else
+     ShowMessage(("Found " + game.value()).c_str(),
+                 "The extraction process will now begin.\n\nThis may take a few minutes.", SDL_MESSAGEBOX_INFORMATION);
++#endif
+ 
+-    return extractor->GenerateOTR();
++    bool ok = extractor->GenerateOTR();
++#ifdef _WIN32
++    printf(ok ? "\n*** Extraction finished. Starting the game. ***\n\n" : "\n*** Extraction failed. ***\n\n");
++    fflush(stdout);
++#endif
++    return ok;
+ }
+ 
+ uint32_t GameEngine::GetInterpolationFPS() {
+-- 
+2.43.0
+

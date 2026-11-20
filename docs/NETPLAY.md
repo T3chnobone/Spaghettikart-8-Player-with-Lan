@@ -30,7 +30,7 @@ When the host starts, every PC goes to character select together; each player
 moves their own numbered cursor. Races run like Couch Party (VS: no CPUs,
 ends when all but one finish; Battle: last one with balloons wins), with each
 PC showing only its own players' views, laid out by its own split-screen
-setting. The results panel's Quit (or quitting from pause) ends the session
+setting. The results menu's Quit (or quitting from pause) ends the session
 for everyone.
 
 The netplay window below is still there for the 8-player Grand Prix.

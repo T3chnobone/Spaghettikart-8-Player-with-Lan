@@ -1,0 +1,55 @@
+From 2536aa4432b31cf2b7df5584e83d9992699a4926 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 29 Oct 2026 15:59:48 +0000
+Subject: [PATCH 13/17] Fix a crash after entering a second record name
+
+The menu texture map held 200 entries while load_texture allowed 500;
+the extra letters drawn for name entry overran it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Qq7B1uqfWVWykYRDDMiuXa
+---
+ src/menu_items.c | 4 ++--
+ src/menu_items.h | 4 +++-
+ 2 files changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/src/menu_items.c b/src/menu_items.c
+index 6808c39..19503dd 100644
+--- a/src/menu_items.c
++++ b/src/menu_items.c
+@@ -3660,7 +3660,7 @@ Gfx* func_80098FC8_wide(Gfx* displayListHead, s32 ulx, s32 uly, s32 lrx, s32 lry
+ }
+ 
+ void load_texture(const char* texture) {
+-    if (sMenuTextureListIndex >= 500) {
++    if (sMenuTextureListIndex >= MENU_TEXTURE_BUFFER_MAX || sMenuTextureEntries >= TEXTURE_MAP_MAX) {
+         printf("\nload_texture: REACHED MAXIMUM MENU ITEMS\n\n");
+         return;
+     }
+@@ -3679,7 +3679,7 @@ void load_texture(const char* texture) {
+  * this will reload the texture.
+  */
+ void load_texture_reset_cache(const char* texture) {
+-    if (sMenuTextureListIndex >= 500) {
++    if (sMenuTextureListIndex >= MENU_TEXTURE_BUFFER_MAX || sMenuTextureEntries >= TEXTURE_MAP_MAX) {
+         printf("\nload_texture: REACHED MAXIMUM MENU ITEMS\n\n");
+         return;
+     }
+diff --git a/src/menu_items.h b/src/menu_items.h
+index 0895334..60979a6 100644
+--- a/src/menu_items.h
++++ b/src/menu_items.h
+@@ -660,7 +660,9 @@ void rmonPrintf(const char*, ...);
+ #define D_8018DEE0_SIZE 0x10
+ #define D_8018E060_SIZE 0x10
+ #define D_8018E0E8_SIZE 0x05
+-#define TEXTURE_MAP_MAX 0xC8
++// Was 0xC8 while load_texture allowed 500 entries: drawing many different
++// letters (name entry, LAN screen) overran the map and crashed the game.
++#define TEXTURE_MAP_MAX 500
+ #define D_8018E768_SIZE 0x08
+ #define D_8018E7E8_SIZE 0x05
+ #define D_8018E810_SIZE 0x05
+-- 
+2.43.0
+

@@ -1,0 +1,3193 @@
+From af7c33e53ce004fbb9a6195090d4e07901597fc0 Mon Sep 17 00:00:00 2001
+From: T3chnobone <98963290+T3chnobone@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 13:25:56 +0000
+Subject: [PATCH 01/17] Add LAN netplay with up to 8 players
+
+Deterministic lockstep over TCP: each PC runs the full game and the host
+relays every player's input per frame. Includes a lobby window (host/join,
+character pick, match type), start-state sync (seed, menu state, gameplay
+CVars), compatibility checks and periodic desync detection.
+
+Big race mode: a 1P Grand Prix where karts 2-8 are driven by other PCs and
+each PC renders its own kart full-screen. Lifts the game's 4-human limits
+(HUD, items, Lakitu, controllers, item use, pause, finish gate) and gives
+every kart full physics. Split-screen mode keeps the classic 2-4 player view.
+
+See docs/NETPLAY.md.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Qq7B1uqfWVWykYRDDMiuXa
+---
+ cmake/dependencies/common.cmake             |    5 +
+ docs/NETPLAY.md                             |  103 ++
+ include/common_structs.h                    |    2 +-
+ src/actors/banana/update.inc.c              |    2 +-
+ src/actors/blue_and_red_shells/update.inc.c |    2 +-
+ src/actors/fake_item_box/update.inc.c       |    2 +-
+ src/actors/green_shell/update.inc.c         |    2 +-
+ src/code_80057C60.c                         |   69 +-
+ src/code_80057C60.h                         |    2 +-
+ src/code_8006E9C0.c                         |   12 +
+ src/engine/objects/Thwomp.cpp               |    3 +-
+ src/main.c                                  |   18 +-
+ src/menu_items.c                            |    3 +-
+ src/player_controller.c                     |   11 +
+ src/port/Game.cpp                           |   49 +-
+ src/port/netplay/Netplay.cpp                |  465 +++++++++
+ src/port/netplay/Netplay.h                  |   33 +
+ src/port/netplay/NetplayCore.cpp            | 1015 +++++++++++++++++++
+ src/port/netplay/NetplayCore.h              |  187 ++++
+ src/port/netplay/netrace.c                  |  174 ++++
+ src/port/netplay/netrace.h                  |   56 +
+ src/port/ui/ImguiUI.cpp                     |    6 +
+ src/port/ui/NetplayWindow.cpp               |  230 +++++
+ src/port/ui/NetplayWindow.h                 |   19 +
+ src/port/ui/PortMenu.cpp                    |    7 +
+ src/racing/actors.c                         |    6 +-
+ src/racing/actors_extended.c                |   17 +-
+ src/racing/race_logic.c                     |   17 +-
+ src/spawn_players.c                         |    4 +
+ src/update_objects.c                        |    5 +-
+ 30 files changed, 2468 insertions(+), 58 deletions(-)
+ create mode 100644 docs/NETPLAY.md
+ create mode 100644 src/port/netplay/Netplay.cpp
+ create mode 100644 src/port/netplay/Netplay.h
+ create mode 100644 src/port/netplay/NetplayCore.cpp
+ create mode 100644 src/port/netplay/NetplayCore.h
+ create mode 100644 src/port/netplay/netrace.c
+ create mode 100644 src/port/netplay/netrace.h
+ create mode 100644 src/port/ui/NetplayWindow.cpp
+ create mode 100644 src/port/ui/NetplayWindow.h
+
+diff --git a/cmake/dependencies/common.cmake b/cmake/dependencies/common.cmake
+index 65d5741..c9cedb5 100644
+--- a/cmake/dependencies/common.cmake
++++ b/cmake/dependencies/common.cmake
+@@ -49,6 +49,11 @@ add_subdirectory(libultraship ${CMAKE_BINARY_DIR}/libultraship)
+ add_dependencies(${PROJECT_NAME} libultraship)
+ target_link_libraries(${PROJECT_NAME} PRIVATE libultraship)
+ 
++# LAN netplay uses plain sockets; Windows needs Winsock.
++if(WIN32)
++  target_link_libraries(${PROJECT_NAME} PRIVATE ws2_32)
++endif()
++
+ # Torch
+ option(USE_STANDALONE "Build as a standalone executable" OFF)
+ option(BUILD_STORMLIB "Build with StormLib support" OFF)
+diff --git a/docs/NETPLAY.md b/docs/NETPLAY.md
+new file mode 100644
+index 0000000..2cf4184
+--- /dev/null
++++ b/docs/NETPLAY.md
+@@ -0,0 +1,103 @@
++# LAN Netplay
++
++Play SpaghettiKart with up to **8 people on separate PCs** over a local network.
++
++There are two match types:
++
++- **Big race (default, 2–8 players).** A Grand Prix where every kart that has a
++  player behind it is human, and each PC shows its own kart full-screen with
++  its own HUD. Empty slots are filled with CPU drivers.
++- **Split-screen (2–4 players).** The classic couch view, mirrored on every PC.
++  Use this for Versus or Battle.
++
++## How it works
++
++Every PC runs the full game. Each frame, every player's controller input goes
++to the host, the host bundles all inputs for that frame and sends the bundle
++back out, and every PC runs the frame with the same inputs. This is
++*deterministic lockstep*: as long as every PC starts in the same state and runs
++the same build, the races stay identical everywhere. Only inputs cross the
++network (a few KB/s per player).
++
++- Transport: TCP on port **27064** (configurable), Nagle disabled.
++- Topology: star. Clients talk only to the host.
++- Input delay: inputs take effect N frames after they are pressed (default 2),
++  which hides network latency. Raise it if play stutters over Wi-Fi.
++- Desync detection: every 30 frames each PC hashes the RNG seed, menu state and
++  every kart's position, velocity, type and item. The host compares them and
++  everyone is warned if they differ.
++
++### Big race internals
++
++The stock game allows 4 human players, and its 1-player Grand Prix already
++simulates 8 karts. A big race runs that 1-player Grand Prix on every PC and
++switches karts 2..N from CPU to human control:
++
++- Players 1–4 use the normal controller slots; players 5–8 get their own
++  controller storage so the stock "any controller" and ghost-replay slots keep
++  working (`get_player_controller()`).
++- Per-human state that was sized for 4 (HUD, item windows, Lakitu) is sized for
++  8, and the per-human updates (item roulette, laps, Lakitu, item use, pause,
++  palm trees, Thwomps) run for every human driver.
++- Every kart gets full physics. The stock game moves karts far from P1's camera
++  on rails, which would otherwise apply to other PCs' players.
++- The race waits for every human to finish (up to 45 seconds after the first
++  finisher) before the results.
++- Rendering is the only per-PC difference: the spare second race camera follows
++  this PC's kart and the HUD reads that kart's data. The camera that game logic uses
++  (the first race camera, following P1) stays identical on every PC.
++
++## Playing
++
++1. Every player opens **Port Menu → Enhancements → LAN Netplay → Open Netplay Window**
++   and picks a character there.
++2. The host enters a name and clicks **Host**. Find the host's LAN IP with
++   `ipconfig` (Windows) or `ip addr` (Linux/macOS).
++3. Everyone else enters the host's IP and clicks **Join**.
++4. The host chooses **Big race** or **Split-screen** and clicks **Start match**.
++   All PCs jump to the main menu on the same frame.
++5. **Big race:** the host picks **1P → Mario GP**, their own character, the class
++   and the cup. Everyone else drives the character they chose in the Netplay
++   window.
++   **Split-screen:** the host picks a 2/3/4-player mode and each player picks
++   their character with their own controller.
++
++Each PC uses its own controller 1 (or keyboard) as its player. The host (P1)
++drives the menus and the post-race screens.
++
++## Requirements and limits
++
++- **Same build everywhere.** Floating-point results can differ between
++  compilers/OSes, so mixed Windows/Linux/macOS matches are refused.
++- **Same mods / custom tracks** and the same Extra (mirror) mode unlock state;
++  mismatches are rejected at join with a reason.
++- Gameplay settings from Enhancements (cheats, rulesets, traffic counts, custom
++  CC, game speed...) are copied from the host for the match and restored
++  afterwards. Changing them mid-match will desync.
++- Pressing Reset, or any player quitting or stalling for 5 seconds, ends the
++  match for everyone. The remaining PCs continue offline.
++- LAN only: there is no NAT traversal, and lockstep with input delay is meant for
++  low-latency links. Internet play would want rollback netcode.
++
++Big race limits (first version, untested on real hardware):
++
++- Grand Prix only. Versus/Battle with more than 4 players would need new menus.
++- Track objects that the stock game only animates near P1's camera (some
++  hazards and scenery) behave as they do for P1 on every PC.
++- Sound is heard from P1's position; look-behind (C-down) only works for P1.
++- The Grand Prix continue/retry decision after a race belongs to P1, and the
++  results and points screens list players 2–8 by character name.
++- If the desync warning appears, please report which track and what happened.
++
++## Code map
++
++| File | Role |
++| --- | --- |
++| `src/port/netplay/NetplayCore.{h,cpp}` | Sockets, protocol, lobby, lockstep, desync check. No game code. |
++| `src/port/netplay/Netplay.{h,cpp}` | Game glue: start-state snapshot, CVar sync, compatibility check, state hash, C API. |
++| `src/port/netplay/netrace.{h,c}` | Big race: human drivers 2–8, their controllers, grid, finish gate, view player. |
++| `src/port/ui/NetplayWindow.{h,cpp}` | ImGui host/join window, match type, character pick. |
++| `src/main.c` | Synced inputs after controller poll; renders this PC's kart in big races. |
++| `src/port/Game.cpp` | Pumps the network, synced reset at match start, one Lakitu per human. |
++| `src/code_80057C60.c`, `src/code_8006E9C0.c` | Per-human HUD, items, laps; HUD follows this PC's kart. |
++| `src/player_controller.c`, `src/racing/*.c`, `src/spawn_players.c`, `src/update_objects.c`, `src/menu_items.c`, `src/actors/*`, `src/engine/objects/Thwomp.cpp` | 4-human limits lifted for big races. |
+diff --git a/include/common_structs.h b/include/common_structs.h
+index caab46e..7fe0519 100644
+--- a/include/common_structs.h
++++ b/include/common_structs.h
+@@ -539,6 +539,6 @@ typedef struct {
+     /* 0x83 */ s8 unk_83;
+ } hud_player; // size = 0x84
+ 
+-#define HUD_PLAYERS_SIZE 4
++#define HUD_PLAYERS_SIZE 8 // per human driver (8 for LAN big races)
+ 
+ #endif
+diff --git a/src/actors/banana/update.inc.c b/src/actors/banana/update.inc.c
+index 04e4ef3..c0bb3c1 100644
+--- a/src/actors/banana/update.inc.c
++++ b/src/actors/banana/update.inc.c
+@@ -54,7 +54,7 @@ void update_actor_banana(struct BananaActor* banana) {
+                 if (gDemoMode) {
+                     controller = gControllerOne;
+                 } else {
+-                    controller = &gControllers[banana->playerId];
++                    controller = get_player_controller(banana->playerId);
+                 }
+                 if ((controller->buttonDepressed & Z_TRIG) != 0) {
+                     controller->buttonDepressed &= ~Z_TRIG;
+diff --git a/src/actors/blue_and_red_shells/update.inc.c b/src/actors/blue_and_red_shells/update.inc.c
+index f85d9ca..efe64f1 100644
+--- a/src/actors/blue_and_red_shells/update.inc.c
++++ b/src/actors/blue_and_red_shells/update.inc.c
+@@ -269,7 +269,7 @@ void update_actor_red_blue_shell(struct ShellActor* shell) {
+                 if (gDemoMode) {
+                     controller = gControllerOne;
+                 } else {
+-                    controller = &gControllers[shell->playerId];
++                    controller = get_player_controller(shell->playerId);
+                 }
+             // } else {
+             //     controller = gControllerOne;
+diff --git a/src/actors/fake_item_box/update.inc.c b/src/actors/fake_item_box/update.inc.c
+index 1c74b91..34b12f7 100644
+--- a/src/actors/fake_item_box/update.inc.c
++++ b/src/actors/fake_item_box/update.inc.c
+@@ -44,7 +44,7 @@ void update_actor_fake_item_box(struct FakeItemBox* fake_item_box) {
+             check_bounding_collision(&fake_item_box->unk30, fake_item_box->boundingBoxSize, fake_item_box->pos[0],
+                                      fake_item_box->pos[1], fake_item_box->pos[2]);
+             func_802B4E30((struct Actor*) fake_item_box);
+-            temp_v1_3 = &gControllers[temp_v1];
++            temp_v1_3 = get_player_controller(temp_v1);
+             if ((temp_v0_4->type & PLAYER_HUMAN) != 0) {
+ 
+                 if ((temp_v1_3->buttonDepressed & Z_TRIG) != 0) {
+diff --git a/src/actors/green_shell/update.inc.c b/src/actors/green_shell/update.inc.c
+index 53b89a4..4126ade 100644
+--- a/src/actors/green_shell/update.inc.c
++++ b/src/actors/green_shell/update.inc.c
+@@ -56,7 +56,7 @@ void update_actor_green_shell(struct ShellActor* shell) {
+                 shell->pos[1] = pad2;
+             }
+             if ((player->type & PLAYER_HUMAN) != 0) {
+-                controller = &gControllers[shell->playerId];
++                controller = get_player_controller(shell->playerId);
+                 if ((controller->buttonDepressed & Z_TRIG) != 0) {
+                     controller->buttonDepressed &= ~Z_TRIG;
+                     if (controller->rawStickY < THROW_SHELL_BACKWARDS) {
+diff --git a/src/code_80057C60.c b/src/code_80057C60.c
+index 37493e3..35f4615 100644
+--- a/src/code_80057C60.c
++++ b/src/code_80057C60.c
+@@ -4,6 +4,7 @@
+  */
+ 
+ #include <libultraship.h>
++#include "port/netplay/netrace.h"
+ #include <macros.h>
+ #include <libultra/gbi.h>
+ #include <mk64.h>
+@@ -231,7 +232,7 @@ Mtx D_80183D60;
+ s32 D_80183DA0;
+ f32 D_80183DA8[4];
+ //! Lakitu?
+-s32 gIndexLakituList[4];
++s32 gIndexLakituList[8];
+ f32 D_80183DC8[4];
+ //! Indexes for the objects associated with the Bomb Karts
+ s32 gIndexObjectBombKart[NUM_BOMB_KARTS_MAX];
+@@ -281,7 +282,7 @@ s32 indexObjectList2[32];
+  * I'm also not certain about its dimensions
+  * I think the entires in this array are way over-sized
+  */
+-const char* gLakituTextureBuffer[4][2];
++const char* gLakituTextureBuffer[8][2]; // per human driver (8 for LAN big races)
+ /**
+  * Boos in Banshee Boardwalk
+  * Spawners for the 4 small fire breaths inside Bowser's Castle
+@@ -331,7 +332,7 @@ s32 gObjectParticle4[gObjectParticle4_SIZE];
+  * trees when you bonk into them
+  */
+ s32 gLeafParticle[gLeafParticle_SIZE];
+-hud_player playerHUD[4];
++hud_player playerHUD[HUD_PLAYERS_SIZE];
+ /**
+  * List of object list indices used by the clouds and stars in some stages
+  * Also used for snowflakes like gObjectParticle1? Not sure what's up with that
+@@ -730,16 +731,18 @@ void func_80058F78(void) {
+ 
+         set_matrix_hud_screen();
+         if ((!gDemoMode) && (gIsHUDVisible != 0) && (D_801657D8 == 0)) {
+-            draw_item_window(PLAYER_ONE);
++            // PLAYER_ONE offline; this PC's own kart in a LAN big race.
++            s32 view = netrace_view_player();
++            draw_item_window(view);
+             if (gHUDModes != 2) {
+-                render_hud_timer(PLAYER_ONE);
+-                draw_simplified_lap_count(PLAYER_ONE);
+-                func_8004EB38(0);
++                render_hud_timer(view);
++                draw_simplified_lap_count(view);
++                func_8004EB38(view);
+                 if (D_801657E6 != false) {
+                     if (CVarGetInteger("gEnableDigitalSpeedometer", false) == true) {
+-                        render_digital_speedometer(PLAYER_ONE);
++                        render_digital_speedometer(view);
+                     }
+-                    render_speedometer(PLAYER_ONE);
++                    render_speedometer(view);
+                 }
+             }
+         }
+@@ -781,7 +784,7 @@ void func_800590D4(void) {
+             switch (gPlayerCountSelection1) {
+                 case 1:
+                     if (gModeSelection != TIME_TRIALS) {
+-                        func_8004E800(PLAYER_ONE);
++                        func_8004E800(netrace_view_player());
+                         break;
+                     }
+                     break;
+@@ -1001,7 +1004,7 @@ void func_80059820(s32 playerId) {
+ }
+ 
+ void randomize_seed_from_controller(s32 arg0) {
+-    struct Controller* controller = &gControllerOne[arg0];
++    struct Controller* controller = get_player_controller(arg0);
+ 
+     if ((controller->button & A_BUTTON) != 0) {
+         gControllerRandom++;
+@@ -1063,6 +1066,11 @@ void func_80059AC8(void) {
+         switch (gScreenModeSelection) {
+             case SCREEN_MODE_1P:
+                 if (gGamestate != CREDITS_SEQUENCE) {
++                    // LAN big race: the other human drivers first, so P1 is
++                    // processed last exactly as in a normal 1P race.
++                    for (i = 1; i < netrace_human_loop_count(); i++) {
++                        func_80059A88(i);
++                    }
+                     func_80059A88(PLAYER_ONE);
+                     if (gModeSelection == TIME_TRIALS) {
+                         func_8005995C();
+@@ -1107,6 +1115,7 @@ void func_80059C50(void) {
+ }
+ 
+ void func_80059D00(void) {
++    s32 k;
+ 
+     func_8005A99C();
+     func_8005A3C0();
+@@ -1115,6 +1124,12 @@ void func_80059D00(void) {
+     if (D_801657AE == 0) {
+         switch (gScreenModeSelection) {
+             case SCREEN_MODE_1P:
++                // LAN big race: lap/HUD bookkeeping for the other human drivers.
++                for (k = 1; k < netrace_human_loop_count(); k++) {
++                    randomize_seed_from_controller(k);
++                    func_80059820(k);
++                    func_8005D0FC(k);
++                }
+                 randomize_seed_from_controller(PLAYER_ONE);
+                 if (D_8018D214 == false) {
+                     func_80059820(PLAYER_ONE);
+@@ -1123,8 +1138,9 @@ void func_80059D00(void) {
+                         // func_8007AA44(0);
+                     }
+                     func_80078C70();
+-                    if (playerHUD[PLAYER_ONE].raceCompleteBool == 0) {
+-                        func_8005C360((gPlayerOne->speed / 18.0f) * 216.0f);
++                    // Speedometer needle: HUD only, follows the kart this PC shows.
++                    if (playerHUD[netrace_view_player()].raceCompleteBool == 0) {
++                        func_8005C360((gPlayers[netrace_view_player()].speed / 18.0f) * 216.0f);
+                     }
+                     func_8005D0FC(PLAYER_ONE);
+                 } else {
+@@ -1299,7 +1315,9 @@ void func_8005A3C0(void) {
+     if ((gGamestate != ENDING) && (gGamestate != CREDITS_SEQUENCE) && !D_8018D204) {
+         switch (gPlayerCountSelection1) {
+             case 1:
+-                if (gControllerOne->buttonPressed & R_CBUTTONS) {
++                // HUD layout toggle: in a LAN big race each PC uses its own player's
++                // C-button (the layout is HUD-only, never read by the race).
++                if (get_player_controller(netrace_view_player())->buttonPressed & R_CBUTTONS) {
+                     if (++gHUDModes >= 3) {
+                         gHUDModes = 0;
+                     }
+@@ -2339,7 +2357,10 @@ void func_8005CB60(s32 playerId, s32 lapCount) {
+                     CM_ActivateFinalLapLakitu(playerId); // func_800790B4(playerId);
+                     break;
+                 case 3: /* switch 1 */
+-                    if ((D_8018D114 == 0) || (D_8018D114 == 1)) {
++                    // LAN big race: the finish HUD layout is a per-screen thing, so
++                    // only switch it when this PC's own kart finishes (HUD-only state).
++                    if (((D_8018D114 == 0) || (D_8018D114 == 1)) &&
++                        (!netrace_active() || (playerId == netrace_view_player()))) {
+                         gHUDModes = 0;
+                         D_801657E6 = 0;
+                         D_801657F0 = 0;
+@@ -2349,7 +2370,7 @@ void func_8005CB60(s32 playerId, s32 lapCount) {
+                         D_8018D204 = (s32) 1;
+                     }
+                     playerHUD[playerId].raceCompleteBool = 1;
+-                    if (D_8018D114 == 2) {
++                    if ((D_8018D114 == 2) && (!netrace_active() || (playerId < 2))) {
+                         D_80165800[playerId] = 0;
+                     }
+                     if (IsYoshiValley()) {
+@@ -2360,11 +2381,14 @@ void func_8005CB60(s32 playerId, s32 lapCount) {
+                     playerHUD[playerId].lap3CompletionTimeX = 0x0280;
+                     playerHUD[playerId].totalTimeX = 0x0320;
+                     D_8016587C = (s32) 1;
+-                    if (D_8018D20C == 0) {
++                    // LAN big race: every human driver gets their own checkered flag.
++                    if ((D_8018D20C == 0) || netrace_active()) {
+                         CM_ActivateFinishLakitu(playerId); // func_80079054(playerId);
+-                        D_8018D20C = 1;
+-                        if (gPlayerCount == (s8) 1) {
+-                            D_8018D1CC = 0x00000064;
++                        if (D_8018D20C == 0) {
++                            D_8018D20C = 1;
++                            if (gPlayerCount == (s8) 1) {
++                                D_8018D1CC = 0x00000064;
++                            }
+                         }
+                     }
+                     break;
+@@ -2433,6 +2457,11 @@ void func_8005D0FC(s32 playerId) {
+             case PLAYER_FOUR:
+                 func_8005CB60(playerId, gLapCountByPlayerId[PLAYER_FOUR]);
+                 break;
++            default: // LAN big race drivers 5-8
++                if (playerId < HUD_PLAYERS_SIZE) {
++                    func_8005CB60(playerId, gLapCountByPlayerId[playerId]);
++                }
++                break;
+         }
+     }
+ }
+diff --git a/src/code_80057C60.h b/src/code_80057C60.h
+index 5ec5cef..f679648 100644
+--- a/src/code_80057C60.h
++++ b/src/code_80057C60.h
+@@ -399,7 +399,7 @@ extern Vec3su D_80183E98;
+ // extern s32 indexObjectList1[]; -> objects.h
+ // extern s32 indexObjectList2[]; -> objects.h
+ 
+-extern const char* gLakituTextureBuffer[4][2];
++extern const char* gLakituTextureBuffer[8][2];
+ // extern s32 indexObjectList3[]; -> objects.h
+ 
+ extern const char** gLakituTexturePtr;
+diff --git a/src/code_8006E9C0.c b/src/code_8006E9C0.c
+index 36af78a..b5c2cec 100644
+--- a/src/code_8006E9C0.c
++++ b/src/code_8006E9C0.c
+@@ -1,4 +1,5 @@
+ #include <libultraship.h>
++#include "port/netplay/netrace.h"
+ #include <macros.h>
+ #include <memory.h>
+ #include <defines.h>
+@@ -656,6 +657,10 @@ void init_hud_one_player(void) {
+     find_unused_obj_index(&D_80183DA0);
+     find_unused_obj_index(&gItemWindowObjectByPlayerId[0]);
+     find_unused_obj_index(&gItemWindowObjectByPlayerId[1]);
++    // LAN big race: an item slot for every other human driver.
++    for (someIndex = 2; someIndex < netrace_human_loop_count(); someIndex++) {
++        find_unused_obj_index(&gItemWindowObjectByPlayerId[someIndex]);
++    }
+     init_object_list_index();
+     func_8007055C(gScreenOneCtx);
+     func_8007055C(gScreenTwoCtx);
+@@ -726,6 +731,13 @@ void init_hud_one_player(void) {
+             D_8018D158 = 1;
+             break;
+     }
++    // LAN big race: every human driver gets P1's full-screen HUD layout, so
++    // whichever kart a PC shows draws in the usual place.
++    for (someIndex = 1; someIndex < netrace_human_loop_count(); someIndex++) {
++        playerHUD[someIndex] = playerHUD[PLAYER_ONE];
++        playerHUD[someIndex].stagingPosition = gGPCurrentRaceRankByPlayerId[someIndex];
++        init_item_window(gItemWindowObjectByPlayerId[someIndex]);
++    }
+ }
+ 
+ void init_hud_two_player_vertical(void) {
+diff --git a/src/engine/objects/Thwomp.cpp b/src/engine/objects/Thwomp.cpp
+index 5d97690..850ef55 100644
+--- a/src/engine/objects/Thwomp.cpp
++++ b/src/engine/objects/Thwomp.cpp
+@@ -9,6 +9,7 @@
+ #include "port/interpolation/FrameInterpolation.h"
+ 
+ extern "C" {
++#include "port/netplay/netrace.h"
+ #include "macros.h"
+ #include "main.h"
+ #include "racing/actors.h"
+@@ -381,7 +382,7 @@ void OThwomp::func_8007F8D8() {
+     }
+ 
+     if (var_s4 != 0) {
+-        for (var_s0 = 0; var_s0 < 4; var_s0++, player++) {
++        for (var_s0 = 0; var_s0 < (netrace_active() ? NUM_PLAYERS : 4); var_s0++, player++) {
+             if ((player->type & PLAYER_EXISTS) && !(player->type & PLAYER_CPU)) {
+                 if (OThwomp::func_8007F75C(var_s0) != 0) {
+                     break;
+diff --git a/src/main.c b/src/main.c
+index 1bdbee6..18b2e36 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -1,4 +1,5 @@
+ #include <libultraship.h>
++#include "port/netplay/netrace.h"
+ #include <libultra/vi.h>
+ #include <libultra/os.h>
+ #include <libultraship/bridge/gfxdebuggerbridge.h>
+@@ -39,6 +40,7 @@
+ #include "engine/wasm.h"
+ #include "port/Game.h"
+ #include "port/Engine.h"
++#include "port/netplay/Netplay.h"
+ #include "engine/Matrix.h"
+ #include "engine/TrackBrowser.h"
+ 
+@@ -395,6 +397,8 @@ void read_controllers(void) {
+     osContStartReadData(&gSIEventMesgQueue);
+     // osRecvMesg(&gSIEventMesgQueue, &msg, OS_MESG_BLOCK);
+     osContGetReadData(gControllerPads);
++    // LAN netplay: swap in every player's input for this frame (no-op offline).
++    Netplay_ExchangeInputs(gControllerPads);
+     update_controller(0);
+     update_controller(1);
+     update_controller(2);
+@@ -746,7 +750,19 @@ void race_logic_loop(void) {
+ 
+     switch (gActiveScreenMode) {
+         case SCREEN_MODE_1P:
+-            render_screens(gScreenOneCtx, RENDER_SCREEN_MODE_1P_PLAYER_ONE, 0, 0);
++            if ((netrace_view_player() != 0) && (gScreenTwoCtx->raceCamera != NULL)) {
++                // LAN big race: this PC shows its own kart full-screen through the
++                // spare race camera. Only the render sees the swap.
++                Camera* savedCamera = gScreenOneCtx->camera;
++                Player* savedPlayer = gScreenOneCtx->player;
++                gScreenOneCtx->camera = gScreenTwoCtx->raceCamera;
++                gScreenOneCtx->player = &gPlayers[netrace_view_player()];
++                render_screens(gScreenOneCtx, RENDER_SCREEN_MODE_1P_PLAYER_ONE, 0, 0);
++                gScreenOneCtx->camera = savedCamera;
++                gScreenOneCtx->player = savedPlayer;
++            } else {
++                render_screens(gScreenOneCtx, RENDER_SCREEN_MODE_1P_PLAYER_ONE, 0, 0);
++            }
+             break;
+         case SCREEN_MODE_2P_SPLITSCREEN_HORIZONTAL:
+             if (gPlayerWinningIndex == 0) {
+diff --git a/src/menu_items.c b/src/menu_items.c
+index dd1c3f1..5957719 100644
+--- a/src/menu_items.c
++++ b/src/menu_items.c
+@@ -1,4 +1,5 @@
+ #include <libultraship.h>
++#include "port/netplay/netrace.h"
+ #include <libultra/types.h>
+ #include <macros.h>
+ #include <string.h>
+@@ -12137,7 +12138,7 @@ void func_800ADF48(MenuItem* arg0) {
+             case 43:
+             case 44:
+                 if (is_screen_being_faded() == 0) {
+-                    controller = &gControllers[gIsGamePaused - 1];
++                    controller = get_player_controller(gIsGamePaused - 1);
+                     if ((controller->buttonPressed | controller->stickPressed) & 0x800) {
+                         if (D_800F0B50[gModeSelection] < arg0->state) {
+                             arg0->state--;
+diff --git a/src/player_controller.c b/src/player_controller.c
+index 89a7742..67182dd 100644
+--- a/src/player_controller.c
++++ b/src/player_controller.c
+@@ -1,4 +1,5 @@
+ #include <libultraship.h>
++#include "port/netplay/netrace.h"
+ #include <macros.h>
+ #include <defines.h>
+ #include <mk64.h>
+@@ -267,6 +268,11 @@ u16 check_player_camera_collision_rubberbanding(Player* player, Camera* camera,
+     if (CVarGetInteger("gDisableRubberbanding", 0) != 0) {
+         return true;
+     }
++    // LAN big race: every kart gets full physics. Otherwise karts far from
++    // P1's camera (including other PCs' players) would be moved on rails.
++    if (netrace_active()) {
++        return true;
++    }
+ 
+     ret = false;
+     switch (gActiveScreenMode) { /* irregular */
+@@ -4406,6 +4412,7 @@ void handle_a_press_for_player_during_race(Player* player, struct Controller* co
+ }
+ 
+ void handle_a_press_for_all_players_during_race(void) {
++    s32 k;
+     u16 temp_v0_3;
+     u16 temp_v0_4;
+     u16 temp_v0_5;
+@@ -4416,6 +4423,10 @@ void handle_a_press_for_all_players_during_race(void) {
+             switch (gModeSelection) {
+                 case GRAND_PRIX:
+                     handle_a_press_for_player_during_race(gPlayerOne, gControllerOne, 0);
++                    // LAN big race: drivers 2-8 are other PCs' players.
++                    for (k = 1; k < netrace_human_loop_count(); k++) {
++                        handle_a_press_for_player_during_race(&gPlayers[k], get_player_controller(k), k);
++                    }
+                     return;
+                 case TIME_TRIALS:
+                     if (D_8015F890 != 1) {
+diff --git a/src/port/Game.cpp b/src/port/Game.cpp
+index 19a41f6..180aa8f 100644
+--- a/src/port/Game.cpp
++++ b/src/port/Game.cpp
+@@ -34,6 +34,10 @@
+ #include "engine/TrackBrowser.h"
+ #include "engine/RandomItemTable.h"
+ #include "engine/sky/Sky.h"
++#include "port/netplay/Netplay.h"
++extern "C" {
++#include "port/netplay/netrace.h"
++}
+ 
+ #ifdef _WIN32
+ #include <locale.h>
+@@ -675,7 +679,8 @@ void CM_SpawnStarterLakitu() {
+         return;
+     }
+ 
+-    for (size_t i = 0; i < gPlayerCountSelection1; i++) {
++    // One Lakitu per human driver (up to 8 in a LAN big race).
++    for (size_t i = 0; i < (size_t) netrace_human_loop_count(); i++) {
+         // Retry does not respawn actors, therefore, re-use lakitu.
+         if (auto it = GetWorld()->Lakitus.find(i); it != GetWorld()->Lakitus.end()) {
+             if (it->second) {
+@@ -924,16 +929,9 @@ void CM_RequestReset(void) {
+     sResetRequested.store(true);
+ }
+ 
+-// The reset widget only requests; the reset is applied here at the top of the
+-// game frame. Applying it from the widget raced the menu state machine: a
+-// press landing mid-fade was re-advanced by the in-flight transition, and a
+-// repeat press rewrote the gamestate it had already set, which the != guard
+-// in main.c swallows while the audio fade still runs (silent no-op).
+-static void ApplyPendingReset() {
+-    if (!sResetRequested.exchange(false)) {
+-        return;
+-    }
+-
++// Puts the game back on the menus. With forNetplay, every machine in a match
++// runs this on the same frame, so it must not depend on local preferences.
++static void ResetToMenus(bool forNetplay) {
+     // The FROM_QUIT gamestates run identical inits; alternating keeps
+     // gGamestateNext != gGamestate true so every press re-enters the menus.
+     gGamestateNext = (gGamestate == MAIN_MENU_FROM_QUIT) ? START_MENU_FROM_QUIT : MAIN_MENU_FROM_QUIT;
+@@ -975,6 +973,12 @@ static void ApplyPendingReset() {
+     if (CVarGetInteger("gEnableDebugMode", 0) == true) {
+         gMenuSelection = START_MENU;
+     }
++
++    if (forNetplay) {
++        // Everyone lands on the main menu together, whatever their intro settings.
++        gMenuSelection = MAIN_MENU;
++        gDemoMode = DEMO_MODE_INACTIVE;
++    }
+     // Re-enter through the intro's own transition protocol (see HM_TickIntro):
+     // FADE_MODE_LOGO makes setup_menus rebuild the menu items and start a
+     // fresh fade-in, replacing any in-flight transition that would otherwise
+@@ -983,8 +987,29 @@ static void ApplyPendingReset() {
+     gFadeModeSelection = FADE_MODE_LOGO;
+ }
+ 
++// The reset widget only requests; the reset is applied here at the top of the
++// game frame. Applying it from the widget raced the menu state machine: a
++// press landing mid-fade was re-advanced by the in-flight transition, and a
++// repeat press rewrote the gamestate it had already set, which the != guard
++// in main.c swallows while the audio fade still runs (silent no-op).
++static void ApplyPendingReset() {
++    if (!sResetRequested.exchange(false)) {
++        return;
++    }
++    // A one-sided reset would desync a netplay match, so it ends the session.
++    Netplay_OnLocalReset();
++    ResetToMenus(false);
++}
++
+ void push_frame() {
+-    ApplyPendingReset();
++    if (Netplay_Update()) {
++        // A LAN match starts now: all machines reset to the same state and the
++        // next game frame is lockstep frame 0.
++        sResetRequested.store(false);
++        ResetToMenus(true);
++    } else {
++        ApplyPendingReset();
++    }
+     GameEngine::StartAudioFrame();
+     GameEngine::Instance->StartFrame();
+     thread5_iteration();
+diff --git a/src/port/netplay/Netplay.cpp b/src/port/netplay/Netplay.cpp
+new file mode 100644
+index 0000000..9ab50b5
+--- /dev/null
++++ b/src/port/netplay/Netplay.cpp
+@@ -0,0 +1,465 @@
++#include "Netplay.h"
++#include "NetplayCore.h"
++
++#include <cstring>
++#include <string>
++#include <vector>
++
++#include "port/Game.h"
++
++extern "C" {
++#include "main.h"
++#include "menus.h"
++#include "save.h"
++#include "code_800029B0.h"
++#include "buffers/random.h"
++#include <common_structs.h>
++#include <defines.h>
++#include "port/netplay/netrace.h"
++}
++
++namespace {
++
++using namespace Netplay;
++
++// Settings from the Enhancements menu that change gameplay. The host's values
++// are pushed to every client for the length of the match, then restored.
++struct SyncedCVar {
++    const char* name;
++    bool isFloat;
++};
++const SyncedCVar kSyncedCVars[] = {
++    { "gAllBombKartsChase", false },  { "gAllThwompsAreMarty", false },  { "gCustomCC", true },
++    { "gDisableItemboxes", false },   { "gDisableLod", false },          { "gDisableRubberbanding", false },
++    { "gEnableCustomCC", false },     { "gEnableMoonJump", false },      { "gFarFrustrum", false },
++    { "gGoFish", false },             { "gHarderCPU", false },           { "gHasTender", false },
++    { "gLookBehind", false },         { "gMinHeight", true },            { "gMultiplayerNoFeatureCuts", false },
++    { "gNoCulling", false },          { "gNoWallColision", false },      { "gNumBuses", false },
++    { "gNumCarriages", false },       { "gNumCars", false },             { "gNumTankerTrucks", false },
++    { "gNumTrains", false },          { "gNumTrucks", false },           { "gShellsShootStraight", false },
++    { "gUniqueCharacterSelections", false },
++};
++constexpr int kNumSyncedCVars = sizeof(kSyncedCVars) / sizeof(kSyncedCVars[0]);
++
++// CVar defaults used only to snapshot "unset" values consistently.
++constexpr int32_t kUnsetInt = INT32_MIN;
++constexpr float kUnsetFloat = -1.0e30f;
++
++struct SavedCVar {
++    bool isFloat;
++    int32_t i;
++    float f;
++};
++std::vector<SavedCVar> sSavedCVars;
++int32_t sSavedFreecam = 0;
++bool sOverridesActive = false;
++
++void SaveAndOverrideLocalOnly() {
++    if (!sOverridesActive) {
++        sSavedCVars.clear();
++        for (auto& cv : kSyncedCVars) {
++            sSavedCVars.push_back({ cv.isFloat, CVarGetInteger(cv.name, kUnsetInt), CVarGetFloat(cv.name, kUnsetFloat) });
++        }
++        sSavedFreecam = CVarGetInteger("gFreecam", 0);
++        sOverridesActive = true;
++    }
++    // Freecam hijacks controller 1, which would feed the wrong input to P1.
++    CVarSetInteger("gFreecam", 0);
++}
++
++void RestoreOverrides() {
++    if (!sOverridesActive) {
++        return;
++    }
++    for (int i = 0; i < kNumSyncedCVars && i < (int) sSavedCVars.size(); i++) {
++        auto& cv = kSyncedCVars[i];
++        auto& saved = sSavedCVars[i];
++        if (cv.isFloat) {
++            if (saved.f != kUnsetFloat) {
++                CVarSetFloat(cv.name, saved.f);
++            } else {
++                CVarClear(cv.name);
++            }
++        } else if (saved.i != kUnsetInt) {
++            CVarSetInteger(cv.name, saved.i);
++        } else {
++            CVarClear(cv.name);
++        }
++    }
++    CVarSetInteger("gFreecam", sSavedFreecam);
++    sOverridesActive = false;
++    gNetBigRace = 0;
++    gNetHumanCount = 0;
++    gNetViewPlayer = 0;
++}
++
++// ---- byte helpers ----
++void Put8(std::vector<uint8_t>& b, uint8_t v) {
++    b.push_back(v);
++}
++void Put32(std::vector<uint8_t>& b, uint32_t v) {
++    for (int i = 0; i < 4; i++) {
++        b.push_back((v >> (8 * i)) & 0xFF);
++    }
++}
++void PutStr(std::vector<uint8_t>& b, const std::string& s) {
++    Put8(b, (uint8_t) std::min<size_t>(s.size(), 255));
++    b.insert(b.end(), s.begin(), s.begin() + std::min<size_t>(s.size(), 255));
++}
++struct Cursor {
++    const std::vector<uint8_t>& b;
++    size_t at = 0;
++    bool ok = true;
++    uint8_t Get8() {
++        if (at >= b.size()) {
++            ok = false;
++            return 0;
++        }
++        return b[at++];
++    }
++    uint32_t Get32() {
++        uint32_t v = 0;
++        for (int i = 0; i < 4; i++) {
++            v |= (uint32_t) Get8() << (8 * i);
++        }
++        return v;
++    }
++    std::string GetStr() {
++        uint8_t n = Get8();
++        if (at + n > b.size()) {
++            ok = false;
++            return {};
++        }
++        std::string s((const char*) b.data() + at, n);
++        at += n;
++        return s;
++    }
++};
++
++uint32_t Fnv(uint32_t h, const void* data, size_t len) {
++    auto* p = (const uint8_t*) data;
++    for (size_t i = 0; i < len; i++) {
++        h = (h ^ p[i]) * 16777619u;
++    }
++    return h;
++}
++
++// ---- compatibility ----
++// Anything that, if different, would make menus or races play out differently.
++const char* PlatformTag() {
++#if defined(_WIN32)
++    const char* os = "windows";
++#elif defined(__APPLE__)
++    const char* os = "macos";
++#elif defined(__linux__)
++    const char* os = "linux";
++#else
++    const char* os = "other";
++#endif
++#if defined(__x86_64__) || defined(_M_X64)
++    const char* cpu = "x64";
++#elif defined(__aarch64__) || defined(_M_ARM64)
++    const char* cpu = "arm64";
++#else
++    const char* cpu = "other";
++#endif
++    static std::string tag = std::string(os) + "-" + cpu;
++    return tag.c_str();
++}
++
++struct Compat {
++    uint8_t extraUnlocked = 0;
++    uint32_t trackCount = 0;
++    uint32_t trackHash = 0;
++    uint32_t playerSize = 0;
++    std::string platform;
++};
++
++std::vector<uint8_t> EncodeCompat(const Compat& c) {
++    std::vector<uint8_t> b;
++    Put8(b, c.extraUnlocked);
++    Put32(b, c.trackCount);
++    Put32(b, c.trackHash);
++    Put32(b, c.playerSize);
++    PutStr(b, c.platform);
++    return b;
++}
++
++Compat DecodeCompat(const std::vector<uint8_t>& b) {
++    Cursor r{ b };
++    Compat c;
++    c.extraUnlocked = r.Get8();
++    c.trackCount = r.Get32();
++    c.trackHash = r.Get32();
++    c.playerSize = r.Get32();
++    c.platform = r.GetStr();
++    return c;
++}
++
++Compat LocalCompat() {
++    Compat c;
++    c.extraUnlocked = has_unlocked_extra_mode() ? 1 : 0;
++    uint32_t h = 2166136261u;
++    for (auto* info : gTrackRegistry.GetAllInfo()) {
++        h = Fnv(h, info->ResourceName.data(), info->ResourceName.size());
++        h = Fnv(h, "|", 1);
++        c.trackCount++;
++    }
++    c.trackHash = h;
++    c.playerSize = sizeof(Player);
++    c.platform = PlatformTag();
++    return c;
++}
++
++std::string DescribeMismatch(const std::vector<uint8_t>& hostBlob, const std::vector<uint8_t>& clientBlob) {
++    Compat h = DecodeCompat(hostBlob);
++    Compat c = DecodeCompat(clientBlob);
++    if (h.playerSize != c.playerSize) {
++        return "Different SpaghettiKart builds - everyone needs the same version";
++    }
++    if (h.platform != c.platform) {
++        return "Different platforms (host " + h.platform + ", you " + c.platform +
++               ") - mixed builds can desync, so all players need the same OS build";
++    }
++    if (h.trackCount != c.trackCount || h.trackHash != c.trackHash) {
++        return "Different track lists - install the same custom tracks/mods as the host";
++    }
++    if (h.extraUnlocked != c.extraUnlocked) {
++        return std::string("Extra (mirror) mode is ") + (h.extraUnlocked ? "unlocked" : "locked") +
++               " for the host but not for you - the menus would differ";
++    }
++    return "Game setup differs from the host";
++}
++
++// ---- start state: everything the menus read that could differ per machine ----
++#define MENU_BYTES(X)                                                                                      \
++    X(gCharacterSelections, sizeof(s8) * 4)                                                                \
++    X(gCharacterGridSelections, sizeof(s8) * 4)                                                            \
++    X(gCharacterGridIsSelected, sizeof(bool) * 4)                                                          \
++    X(gGameModeMenuColumn, sizeof(s8) * NUM_ROWS_GAME_MODE_MENU)                                           \
++    X(gGameModeSubMenuColumn, sizeof(s8) * NUM_COLUMN_GAME_MODE_SUB_MENU * NUM_ROWS_GAME_MODE_SUB_MENU)    \
++    X(&gMainMenuSelection, sizeof(gMainMenuSelection))                                                     \
++    X(&gSubMenuSelection, sizeof(gSubMenuSelection))                                                       \
++    X(&gPlayerSelectMenuSelection, sizeof(gPlayerSelectMenuSelection))                                     \
++    X(&gCupSelection, sizeof(gCupSelection))                                                               \
++    X(&sTempCupSelection, sizeof(sTempCupSelection))                                                       \
++    X(&gCourseIndexInCup, sizeof(gCourseIndexInCup))                                                       \
++    X(&gScreenModeListIndex, sizeof(gScreenModeListIndex))                                                 \
++    X(&gPlayerCount, sizeof(gPlayerCount))                                                                 \
++    X(&gNextDemoId, sizeof(gNextDemoId))                                                                   \
++    X(&gDemoUseController, sizeof(gDemoUseController))                                                     \
++    X(&gMenuTimingCounter, sizeof(gMenuTimingCounter))                                                     \
++    X(&gMenuDelayTimer, sizeof(gMenuDelayTimer))                                                           \
++    X(&gScreenModeSelection, sizeof(gScreenModeSelection))                                                 \
++    X(&gPlayerCountSelection1, sizeof(gPlayerCountSelection1))                                             \
++    X(&gModeSelection, sizeof(gModeSelection))                                                             \
++    X(&gCCSelection, sizeof(gCCSelection))                                                                 \
++    X(&gIsMirrorMode, sizeof(gIsMirrorMode))                                                               \
++    X(&gRandomSeed16, sizeof(gRandomSeed16))                                                               \
++    X(&gTickLogic, sizeof(gTickLogic))
++
++std::vector<uint8_t> CaptureStartState() {
++    std::vector<uint8_t> b;
++#define CAPTURE(ptr, size)                                \
++    {                                                     \
++        const uint8_t* p = (const uint8_t*) (ptr);        \
++        b.insert(b.end(), p, p + (size));                 \
++    }
++    MENU_BYTES(CAPTURE)
++#undef CAPTURE
++
++    // Big race: who drives which kart, with which character.
++    const Session& s = Get();
++    bool bigRace = !(s.LobbyOptions() & kOptionSplitScreen);
++    Put8(b, bigRace ? 1 : 0);
++    Put8(b, (uint8_t) s.PlayerCount());
++    for (int i = 0; i < kMaxPlayers; i++) {
++        Put8(b, s.Players()[i].profile);
++    }
++    gNetBigRace = bigRace ? 1 : 0;
++    gNetHumanCount = s.PlayerCount();
++    for (int i = 0; i < kMaxPlayers; i++) {
++        gNetCharacters[i] = (s8) (s.Players()[i].profile & 7);
++    }
++
++    Put8(b, (uint8_t) kNumSyncedCVars);
++    for (auto& cv : kSyncedCVars) {
++        PutStr(b, cv.name);
++        Put8(b, cv.isFloat ? 1 : 0);
++        if (cv.isFloat) {
++            float f = CVarGetFloat(cv.name, kUnsetFloat);
++            uint32_t bits;
++            memcpy(&bits, &f, 4);
++            Put32(b, bits);
++        } else {
++            Put32(b, (uint32_t) CVarGetInteger(cv.name, kUnsetInt));
++        }
++    }
++    SaveAndOverrideLocalOnly();
++    return b;
++}
++
++bool ApplyStartState(const std::vector<uint8_t>& b, std::string& err) {
++    size_t need = 0;
++#define MEASURE(ptr, size) need += (size);
++    MENU_BYTES(MEASURE)
++#undef MEASURE
++    if (b.size() < need) {
++        err = "start state too short";
++        return false;
++    }
++    size_t at = 0;
++#define APPLY(ptr, size)                    \
++    {                                       \
++        memcpy((void*) (ptr), &b[at], (size)); \
++        at += (size);                       \
++    }
++    MENU_BYTES(APPLY)
++#undef APPLY
++
++    SaveAndOverrideLocalOnly();
++    Cursor r{ b, at };
++    gNetBigRace = r.Get8() ? 1 : 0;
++    gNetHumanCount = r.Get8();
++    for (int i = 0; i < kMaxPlayers; i++) {
++        gNetCharacters[i] = (s8) (r.Get8() & 7);
++    }
++    int n = r.Get8();
++    for (int i = 0; i < n && r.ok; i++) {
++        std::string name = r.GetStr();
++        bool isFloat = r.Get8() != 0;
++        uint32_t bits = r.Get32();
++        if (!r.ok) {
++            break;
++        }
++        if (isFloat) {
++            float f;
++            memcpy(&f, &bits, 4);
++            if (f == kUnsetFloat) {
++                CVarClear(name.c_str());
++            } else {
++                CVarSetFloat(name.c_str(), f);
++            }
++        } else if ((int32_t) bits == kUnsetInt) {
++            CVarClear(name.c_str());
++        } else {
++            CVarSetInteger(name.c_str(), (int32_t) bits);
++        }
++    }
++    if (!r.ok) {
++        err = "malformed settings";
++        return false;
++    }
++    return true;
++}
++
++uint32_t StateHash() {
++    uint32_t h = 2166136261u;
++    h = Fnv(h, &gRandomSeed16, sizeof(gRandomSeed16));
++    h = Fnv(h, &gMenuSelection, sizeof(gMenuSelection));
++    h = Fnv(h, &gModeSelection, sizeof(gModeSelection));
++    h = Fnv(h, &gCCSelection, sizeof(gCCSelection));
++    h = Fnv(h, &gPlayerCountSelection1, sizeof(gPlayerCountSelection1));
++    h = Fnv(h, gCharacterSelections, sizeof(s8) * 4);
++    h = Fnv(h, &gNetHumanCount, sizeof(gNetHumanCount));
++    if (gGamestate == RACING) {
++        h = Fnv(h, &gGamestate, sizeof(gGamestate));
++        for (int i = 0; i < NUM_PLAYERS; i++) {
++            const Player& p = gPlayers[i];
++            h = Fnv(h, &p.pos, sizeof(p.pos));
++            h = Fnv(h, &p.velocity, sizeof(p.velocity));
++            h = Fnv(h, &p.rotation, sizeof(p.rotation));
++            h = Fnv(h, &p.currentSpeed, sizeof(p.currentSpeed));
++            h = Fnv(h, &p.type, sizeof(p.type));
++            h = Fnv(h, &p.currentItemCopy, sizeof(p.currentItemCopy));
++        }
++    }
++    return h;
++}
++
++void EnsureHooks() {
++    static bool sInstalled = false;
++    if (sInstalled) {
++        return;
++    }
++    sInstalled = true;
++    Hooks hooks;
++    hooks.compatBlob = [] { return EncodeCompat(LocalCompat()); };
++    hooks.describeMismatch = DescribeMismatch;
++    hooks.captureStartState = CaptureStartState;
++    hooks.applyStartState = ApplyStartState;
++    hooks.stateHash = StateHash;
++    hooks.onSessionEnd = RestoreOverrides;
++    Get().SetHooks(std::move(hooks));
++}
++
++Pad FromOS(const OSContPad& p) {
++    Pad pad;
++    pad.button = (uint32_t) p.button;
++    pad.stickX = p.stick_x;
++    pad.stickY = p.stick_y;
++    pad.rightStickX = p.right_stick_x;
++    pad.rightStickY = p.right_stick_y;
++    return pad;
++}
++
++void ToOS(const Pad& pad, OSContPad& p) {
++    p.button = (decltype(p.button)) pad.button;
++    p.stick_x = pad.stickX;
++    p.stick_y = pad.stickY;
++    p.right_stick_x = pad.rightStickX;
++    p.right_stick_y = pad.rightStickY;
++    p.err_no = 0;
++    p.gyro_x = 0.0f;
++    p.gyro_y = 0.0f;
++}
++
++} // namespace
++
++namespace Netplay {
++// Used by the UI so it can run the same pre-flight the hooks need.
++void InstallGameHooks() {
++    EnsureHooks();
++}
++} // namespace Netplay
++
++extern "C" bool Netplay_Update(void) {
++    EnsureHooks();
++    bool started = Get().Update();
++    if (started) {
++        gNetViewPlayer = Get().LocalSlot(); // render-only: this PC's own kart
++    }
++    if (!Get().IsInGame() && Get().GetPhase() == Phase::Idle) {
++        RestoreOverrides(); // covers a client that applied START but dropped before frame 0
++    }
++    return started;
++}
++
++extern "C" void Netplay_ExchangeInputs(OSContPad* pads) {
++    Session& s = Get();
++    if (!s.IsInGame()) {
++        return;
++    }
++    FramePads all;
++    if (!s.ExchangeInputs(FromOS(pads[0]), all)) {
++        return; // session ended; this machine carries on locally
++    }
++    // Players 1-4 go through the stock controller path; 5-8 (big race) have
++    // their own storage.
++    for (int i = 0; i < 4; i++) {
++        ToOS(all[i], pads[i]);
++    }
++    for (int i = 4; i < kMaxPlayers; i++) {
++        netrace_set_extra_pad(i - 4, (u16) all[i].button, all[i].stickX, all[i].stickY);
++    }
++}
++
++extern "C" bool Netplay_IsInGame(void) {
++    return Get().IsInGame();
++}
++
++extern "C" void Netplay_OnLocalReset(void) {
++    if (Get().GetRole() != Role::None) {
++        Get().Disconnect("Session ended: a player reset the game");
++    }
++}
+diff --git a/src/port/netplay/Netplay.h b/src/port/netplay/Netplay.h
+new file mode 100644
+index 0000000..d10865e
+--- /dev/null
++++ b/src/port/netplay/Netplay.h
+@@ -0,0 +1,33 @@
++#ifndef SPAGHETTI_NETPLAY_H
++#define SPAGHETTI_NETPLAY_H
++
++// Game-side glue for LAN netplay. See NetplayCore.h for how the sync works.
++
++#include <libultraship.h>
++#include <stdbool.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++// Top of every game frame. Returns true when a netplay match starts this
++// frame; the caller must then perform Netplay's synced reset before running it.
++bool Netplay_Update(void);
++
++// Called right after the local controllers are polled. While a match is
++// running this replaces pads[0..3] with every player's input for this frame
++// (blocking briefly if a remote player's input is still in flight).
++void Netplay_ExchangeInputs(OSContPad* pads);
++
++// True while a lockstep match is running.
++bool Netplay_IsInGame(void);
++
++// The local user pressed Reset in the menu. Ends any session (a one-sided
++// reset would desync everyone).
++void Netplay_OnLocalReset(void);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+diff --git a/src/port/netplay/NetplayCore.cpp b/src/port/netplay/NetplayCore.cpp
+new file mode 100644
+index 0000000..5cdf3dc
+--- /dev/null
++++ b/src/port/netplay/NetplayCore.cpp
+@@ -0,0 +1,1015 @@
++#include "NetplayCore.h"
++
++#include <algorithm>
++#include <chrono>
++#include <cstring>
++
++#ifdef _WIN32
++#ifndef WIN32_LEAN_AND_MEAN
++#define WIN32_LEAN_AND_MEAN
++#endif
++#include <winsock2.h>
++#include <ws2tcpip.h>
++using SockLen = int;
++#define NS(s) ((SOCKET) (s))
++#define NP_CLOSESOCK closesocket
++#define NP_WOULDBLOCK(e) ((e) == WSAEWOULDBLOCK)
++#define NP_INPROGRESS(e) ((e) == WSAEWOULDBLOCK || (e) == WSAEINPROGRESS)
++static int NpLastError() {
++    return WSAGetLastError();
++}
++#else
++#include <arpa/inet.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <netdb.h>
++#include <netinet/in.h>
++#include <netinet/tcp.h>
++#include <sys/select.h>
++#include <sys/socket.h>
++#include <unistd.h>
++using SockLen = socklen_t;
++#define NS(s) ((int) (s))
++#define NP_CLOSESOCK ::close
++#define NP_WOULDBLOCK(e) ((e) == EWOULDBLOCK || (e) == EAGAIN)
++#define NP_INPROGRESS(e) ((e) == EINPROGRESS || (e) == EWOULDBLOCK || (e) == EAGAIN)
++static int NpLastError() {
++    return errno;
++}
++#endif
++
++#if defined(MSG_NOSIGNAL)
++#define NP_SEND_FLAGS MSG_NOSIGNAL
++#else
++#define NP_SEND_FLAGS 0
++#endif
++
++namespace Netplay {
++
++namespace {
++
++constexpr uint32_t kMagic = 0x4D4B3634; // "MK64"
++constexpr uint16_t kProtocolVersion = 1;
++constexpr uint32_t kMaxMessage = 1u << 20;
++
++enum MsgType : uint8_t {
++    MSG_HELLO = 1,  // C->H  magic, version, name, compat blob
++    MSG_WELCOME,    // H->C  slot
++    MSG_REJECT,     // H->C  reason
++    MSG_LOBBY,      // H->C  input delay, player table
++    MSG_START,      // H->C  your slot, player count, input delay, start state
++    MSG_INPUT,      // C->H  frame, pad
++    MSG_FRAME,      // H->C  frame, pads
++    MSG_HASH,       // C->H  frame, hash
++    MSG_DESYNC,     // H->C  frame
++    MSG_BYE,        // any   reason
++    MSG_PROFILE,    // C->H  profile byte
++};
++
++#ifdef _WIN32
++bool sWinsockReady = false;
++#endif
++
++bool EnsureSockets() {
++#ifdef _WIN32
++    if (!sWinsockReady) {
++        WSADATA data;
++        if (WSAStartup(MAKEWORD(2, 2), &data) != 0) {
++            return false;
++        }
++        sWinsockReady = true;
++    }
++#endif
++    return true;
++}
++
++bool SetNonBlocking(intptr_t s) {
++#ifdef _WIN32
++    u_long mode = 1;
++    return ioctlsocket(NS(s), FIONBIO, &mode) == 0;
++#else
++    int flags = fcntl((int) s, F_GETFL, 0);
++    return flags >= 0 && fcntl((int) s, F_SETFL, flags | O_NONBLOCK) == 0;
++#endif
++}
++
++void TuneSocket(intptr_t s) {
++    int one = 1;
++    setsockopt(NS(s), IPPROTO_TCP, TCP_NODELAY, (const char*) &one, sizeof(one));
++#ifdef SO_NOSIGPIPE
++    setsockopt(NS(s), SOL_SOCKET, SO_NOSIGPIPE, (const char*) &one, sizeof(one));
++#endif
++}
++
++void CloseSock(intptr_t& s) {
++    if (s != -1) {
++        NP_CLOSESOCK(NS(s));
++        s = -1;
++    }
++}
++
++// ---- little-endian serialization ----
++struct Writer {
++    std::vector<uint8_t> buf;
++    void U8(uint8_t v) {
++        buf.push_back(v);
++    }
++    void U16(uint16_t v) {
++        U8(v & 0xFF);
++        U8(v >> 8);
++    }
++    void U32(uint32_t v) {
++        U16(v & 0xFFFF);
++        U16(v >> 16);
++    }
++    void Str(const std::string& s) {
++        U16((uint16_t) std::min<size_t>(s.size(), 0xFFFF));
++        buf.insert(buf.end(), s.begin(), s.begin() + std::min<size_t>(s.size(), 0xFFFF));
++    }
++    void Blob(const std::vector<uint8_t>& b) {
++        U32((uint32_t) b.size());
++        buf.insert(buf.end(), b.begin(), b.end());
++    }
++    void PadV(const Pad& p) {
++        U32(p.button);
++        U8((uint8_t) p.stickX);
++        U8((uint8_t) p.stickY);
++        U8((uint8_t) p.rightStickX);
++        U8((uint8_t) p.rightStickY);
++    }
++};
++
++struct Reader {
++    const uint8_t* p;
++    size_t n;
++    bool ok = true;
++    Reader(const uint8_t* data, size_t len) : p(data), n(len) {
++    }
++    bool Need(size_t k) {
++        if (!ok || n < k) {
++            ok = false;
++            return false;
++        }
++        return true;
++    }
++    uint8_t U8() {
++        if (!Need(1)) {
++            return 0;
++        }
++        uint8_t v = *p;
++        p++;
++        n--;
++        return v;
++    }
++    uint16_t U16() {
++        uint16_t lo = U8();
++        return lo | (uint16_t) (U8() << 8);
++    }
++    uint32_t U32() {
++        uint32_t lo = U16();
++        return lo | ((uint32_t) U16() << 16);
++    }
++    std::string Str() {
++        uint16_t len = U16();
++        if (!Need(len)) {
++            return {};
++        }
++        std::string s((const char*) p, len);
++        p += len;
++        n -= len;
++        return s;
++    }
++    std::vector<uint8_t> Blob() {
++        uint32_t len = U32();
++        if (!Need(len)) {
++            return {};
++        }
++        std::vector<uint8_t> b(p, p + len);
++        p += len;
++        n -= len;
++        return b;
++    }
++    Pad PadV() {
++        Pad pad;
++        pad.button = U32();
++        pad.stickX = (int8_t) U8();
++        pad.stickY = (int8_t) U8();
++        pad.rightStickX = (int8_t) U8();
++        pad.rightStickY = (int8_t) U8();
++        return pad;
++    }
++};
++
++double NowSeconds() {
++    using namespace std::chrono;
++    return duration<double>(steady_clock::now().time_since_epoch()).count();
++}
++
++std::string CleanName(const std::string& name, int slot) {
++    std::string out;
++    for (char ch : name) {
++        if (ch >= 32 && ch < 127) {
++            out.push_back(ch);
++        }
++        if (out.size() >= 16) {
++            break;
++        }
++    }
++    if (out.empty()) {
++        out = "Player " + std::to_string(slot + 1);
++    }
++    return out;
++}
++
++} // namespace
++
++struct Session::Conn {
++    intptr_t sock = -1;
++    std::vector<uint8_t> rx;
++    std::vector<uint8_t> tx;
++    bool connecting = false; // client: non-blocking connect still in flight
++    bool handshaken = false; // host: HELLO accepted
++    bool closing = false;    // flush tx then drop
++    bool dead = false;
++
++    ~Conn() {
++        CloseSock(sock);
++    }
++
++    void Flush() {
++        while (!tx.empty() && !dead && !connecting) {
++            int sent = (int) send(NS(sock), (const char*) tx.data(), (int) std::min<size_t>(tx.size(), 1 << 16),
++                                  NP_SEND_FLAGS);
++            if (sent > 0) {
++                tx.erase(tx.begin(), tx.begin() + sent);
++                continue;
++            }
++            if (sent < 0 && NP_WOULDBLOCK(NpLastError())) {
++                return;
++            }
++            dead = true;
++        }
++    }
++};
++
++Session& Get() {
++    static Session sSession;
++    return sSession;
++}
++
++Session::Session() {
++    mInputs.resize(kRing);
++    mHashes.resize(kRing);
++}
++
++Session::~Session() {
++    Disconnect();
++}
++
++int Session::PlayerCount() const {
++    if (mPhase == Phase::InGame) {
++        return mPlayerCount;
++    }
++    int n = 0;
++    for (auto& p : mPlayers) {
++        n += p.connected ? 1 : 0;
++    }
++    return n;
++}
++
++void Session::SetLocalProfile(uint8_t profile) {
++    mLocalProfile = profile;
++    if (mRole == Role::Host) {
++        mPlayers[0].profile = profile;
++        if (mPhase == Phase::Lobby) {
++            BroadcastLobby();
++        }
++    } else if (mRole == Role::Client && mPhase == Phase::Lobby && mConns[0] != nullptr) {
++        Writer w;
++        w.U8(profile);
++        SendTo(*mConns[0], MSG_PROFILE, w.buf);
++    }
++}
++
++void Session::SetLobbyOptions(uint8_t options) {
++    if (mRole == Role::Host) {
++        mLobbyOptions = options;
++        if (mPhase == Phase::Lobby) {
++            BroadcastLobby();
++        }
++    }
++}
++
++void Session::SetInputDelay(int frames) {
++    mInputDelay = std::clamp(frames, 0, kMaxInputDelay);
++    if (mRole == Role::Host && mPhase == Phase::Lobby) {
++        BroadcastLobby();
++    }
++}
++
++void Session::ResetState() {
++    for (auto& c : mConns) {
++        delete c;
++        c = nullptr;
++    }
++    CloseSock(mListenSock);
++    mRole = Role::None;
++    mPhase = Phase::Idle;
++    mLocalSlot = 0;
++    mPlayerCount = 0;
++    mFrame = 0;
++    mStartRequested = false;
++    mStartPending = false;
++    mPlayers = {};
++    mDesyncFrame = UINT32_MAX;
++    mLastStallMs = 0.0;
++    std::fill(mInputs.begin(), mInputs.end(), InputSlot{});
++    std::fill(mHashes.begin(), mHashes.end(), HashSlot{});
++}
++
++void Session::Disconnect(const std::string& reason) {
++    if (mRole == Role::None) {
++        return;
++    }
++    bool wasInGame = mPhase == Phase::InGame;
++    Writer w;
++    w.Str(reason.empty() ? "Player left" : reason);
++    for (auto* c : mConns) {
++        if (c != nullptr && !c->connecting) {
++            SendTo(*c, MSG_BYE, w.buf);
++            c->Flush();
++        }
++    }
++    ResetState();
++    mStatus = reason.empty() ? "Disconnected" : reason;
++    if (wasInGame && mHooks.onSessionEnd) {
++        mHooks.onSessionEnd();
++    }
++}
++
++void Session::Fail(const std::string& reason) {
++    mLastError = reason;
++    Disconnect(reason);
++}
++
++// ------------------------------------------------------------------ hosting
++
++bool Session::Host(uint16_t port, const std::string& name) {
++    Disconnect();
++    mLastError.clear();
++    if (!EnsureSockets()) {
++        mLastError = "Could not initialise networking";
++        return false;
++    }
++    intptr_t s = (intptr_t) socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
++    if (s == -1) {
++        mLastError = "Could not create socket";
++        return false;
++    }
++    int one = 1;
++    setsockopt(NS(s), SOL_SOCKET, SO_REUSEADDR, (const char*) &one, sizeof(one));
++    sockaddr_in addr{};
++    addr.sin_family = AF_INET;
++    addr.sin_addr.s_addr = htonl(INADDR_ANY);
++    addr.sin_port = htons(port);
++    if (bind(NS(s), (sockaddr*) &addr, sizeof(addr)) != 0 || listen(NS(s), 4) != 0 || !SetNonBlocking(s)) {
++        CloseSock(s);
++        mLastError = "Could not listen on port " + std::to_string(port) + " (already in use?)";
++        return false;
++    }
++    mListenSock = s;
++    mRole = Role::Host;
++    mPhase = Phase::Lobby;
++    mLocalSlot = 0;
++    mLocalName = CleanName(name, 0);
++    mPlayers[0] = { true, mLocalName, mLocalProfile };
++    mStatus = "Hosting on port " + std::to_string(port) + " - waiting for players";
++    return true;
++}
++
++void Session::AcceptNewClients() {
++    while (mListenSock != -1) {
++        sockaddr_in from{};
++        SockLen len = sizeof(from);
++        auto raw = accept(NS(mListenSock), (sockaddr*) &from, &len);
++        intptr_t s = (intptr_t) raw;
++        if (s == -1) {
++            return;
++        }
++        SetNonBlocking(s);
++        TuneSocket(s);
++        auto* c = new Conn();
++        c->sock = s;
++
++        int slot = -1;
++        if (mPhase == Phase::Lobby) {
++            for (int i = 1; i < kMaxPlayers; i++) {
++                if (mConns[i] == nullptr) {
++                    slot = i;
++                    break;
++                }
++            }
++        }
++        if (slot < 0) {
++            Writer w;
++            w.Str(mPhase == Phase::InGame ? "A match is already running" : "The lobby is full");
++            SendTo(*c, MSG_REJECT, w.buf);
++            c->Flush();
++            delete c;
++            continue;
++        }
++        mConns[slot] = c; // becomes a player once HELLO checks out
++    }
++}
++
++bool Session::RequestStart() {
++    if (mRole != Role::Host || mPhase != Phase::Lobby || PlayerCount() < 2) {
++        return false;
++    }
++    mStartRequested = true;
++    return true;
++}
++
++void Session::BroadcastLobby() {
++    Writer w;
++    w.U8((uint8_t) mInputDelay);
++    w.U8(mLobbyOptions);
++    for (auto& p : mPlayers) {
++        w.U8(p.connected ? 1 : 0);
++        w.Str(p.name);
++        w.U8(p.profile);
++    }
++    for (int i = 1; i < kMaxPlayers; i++) {
++        if (mConns[i] != nullptr && mConns[i]->handshaken) {
++            SendTo(*mConns[i], MSG_LOBBY, w.buf);
++        }
++    }
++}
++
++// ------------------------------------------------------------------ joining
++
++bool Session::Join(const std::string& address, uint16_t port, const std::string& name) {
++    Disconnect();
++    mLastError.clear();
++    if (!EnsureSockets()) {
++        mLastError = "Could not initialise networking";
++        return false;
++    }
++    addrinfo hints{};
++    hints.ai_family = AF_INET;
++    hints.ai_socktype = SOCK_STREAM;
++    addrinfo* res = nullptr;
++    std::string portStr = std::to_string(port);
++    if (getaddrinfo(address.c_str(), portStr.c_str(), &hints, &res) != 0 || res == nullptr) {
++        mLastError = "Could not resolve '" + address + "'";
++        return false;
++    }
++    intptr_t s = (intptr_t) socket(res->ai_family, res->ai_socktype, res->ai_protocol);
++    if (s == -1 || !SetNonBlocking(s)) {
++        freeaddrinfo(res);
++        CloseSock(s);
++        mLastError = "Could not create socket";
++        return false;
++    }
++    TuneSocket(s);
++    int rc = connect(NS(s), res->ai_addr, (SockLen) res->ai_addrlen);
++    freeaddrinfo(res);
++    if (rc != 0 && !NP_INPROGRESS(NpLastError())) {
++        CloseSock(s);
++        mLastError = "Could not connect to " + address;
++        return false;
++    }
++    auto* c = new Conn();
++    c->sock = s;
++    c->connecting = true;
++    mConns[0] = c;
++    mRole = Role::Client;
++    mPhase = Phase::Connecting;
++    mLocalName = CleanName(name, 1);
++    mStatus = "Connecting to " + address + ":" + portStr + "...";
++    mConnectStarted = NowSeconds();
++    return true;
++}
++
++// ------------------------------------------------------------------ messaging
++
++void Session::SendTo(Conn& c, uint8_t type, const std::vector<uint8_t>& payload) {
++    uint32_t len = (uint32_t) payload.size() + 1;
++    c.tx.push_back(len & 0xFF);
++    c.tx.push_back((len >> 8) & 0xFF);
++    c.tx.push_back((len >> 16) & 0xFF);
++    c.tx.push_back((len >> 24) & 0xFF);
++    c.tx.push_back(type);
++    c.tx.insert(c.tx.end(), payload.begin(), payload.end());
++    c.Flush();
++}
++
++void Session::Broadcast(uint8_t type, const std::vector<uint8_t>& payload) {
++    for (int i = 1; i < kMaxPlayers; i++) {
++        if (mConns[i] != nullptr && mConns[i]->handshaken) {
++            SendTo(*mConns[i], type, payload);
++        }
++    }
++}
++
++// Reads everything available on a connection and dispatches whole messages.
++// Returns false when the connection is gone.
++bool Session::PumpConn(Conn& c, int slotIndex) {
++    if (c.dead) {
++        return false;
++    }
++    if (c.connecting) {
++        fd_set wset, eset;
++        FD_ZERO(&wset);
++        FD_ZERO(&eset);
++        FD_SET(NS(c.sock), &wset);
++        FD_SET(NS(c.sock), &eset);
++        timeval tv{ 0, 0 };
++        if (select((int) c.sock + 1, nullptr, &wset, &eset, &tv) <= 0) {
++            return true; // still connecting
++        }
++        int err = 0;
++        SockLen len = sizeof(err);
++        getsockopt(NS(c.sock), SOL_SOCKET, SO_ERROR, (char*) &err, &len);
++        if (err != 0 || FD_ISSET(NS(c.sock), &eset)) {
++            return false;
++        }
++        c.connecting = false;
++        if (mHooks.compatBlob == nullptr) {
++            return false;
++        }
++        Writer w;
++        w.U32(kMagic);
++        w.U16(kProtocolVersion);
++        w.Str(mLocalName);
++        w.Blob(mHooks.compatBlob());
++        SendTo(c, MSG_HELLO, w.buf);
++    }
++
++    uint8_t buf[4096];
++    for (;;) {
++        int n = (int) recv(NS(c.sock), (char*) buf, sizeof(buf), 0);
++        if (n > 0) {
++            c.rx.insert(c.rx.end(), buf, buf + n);
++            continue;
++        }
++        if (n == 0) {
++            c.dead = true;
++            break;
++        }
++        if (NP_WOULDBLOCK(NpLastError())) {
++            break;
++        }
++        c.dead = true;
++        break;
++    }
++
++    size_t off = 0;
++    while (c.rx.size() - off >= 5) {
++        const uint8_t* h = c.rx.data() + off;
++        uint32_t len = h[0] | (h[1] << 8) | (h[2] << 16) | ((uint32_t) h[3] << 24);
++        if (len == 0 || len > kMaxMessage) {
++            c.dead = true;
++            break;
++        }
++        if (c.rx.size() - off < 4 + (size_t) len) {
++            break;
++        }
++        HandleMessage(c, slotIndex, h[4], h + 5, len - 1);
++        off += 4 + len;
++        if (c.closing || mRole == Role::None) {
++            break;
++        }
++    }
++    if (mRole == Role::None) {
++        return false; // session was torn down while handling
++    }
++    c.rx.erase(c.rx.begin(), c.rx.begin() + std::min(off, c.rx.size()));
++    c.Flush();
++    return !c.dead && !c.closing;
++}
++
++void Session::HandleMessage(Conn& c, int slotIndex, uint8_t type, const uint8_t* data, size_t len) {
++    Reader r(data, len);
++
++    if (mRole == Role::Host) {
++        if (!c.handshaken) {
++            if (type != MSG_HELLO) {
++                c.closing = true;
++                return;
++            }
++            uint32_t magic = r.U32();
++            uint16_t version = r.U16();
++            std::string name = r.Str();
++            std::vector<uint8_t> blob = r.Blob();
++            std::string reject;
++            if (!r.ok || magic != kMagic) {
++                reject = "Not a SpaghettiKart netplay client";
++            } else if (version != kProtocolVersion) {
++                reject = "Netplay version mismatch (host " + std::to_string(kProtocolVersion) + ", you " +
++                         std::to_string(version) + ")";
++            } else if (mHooks.compatBlob && blob != mHooks.compatBlob()) {
++                reject = mHooks.describeMismatch ? mHooks.describeMismatch(mHooks.compatBlob(), blob)
++                                                 : "Game setup differs from the host";
++            }
++            if (!reject.empty()) {
++                Writer w;
++                w.Str(reject);
++                SendTo(c, MSG_REJECT, w.buf);
++                c.closing = true;
++                return;
++            }
++            c.handshaken = true;
++            mPlayers[slotIndex] = { true, CleanName(name, slotIndex) };
++            Writer w;
++            w.U8((uint8_t) slotIndex);
++            SendTo(c, MSG_WELCOME, w.buf);
++            BroadcastLobby();
++            mStatus = "Lobby: " + std::to_string(PlayerCount()) + " players";
++            return;
++        }
++        switch (type) {
++            case MSG_INPUT: {
++                uint32_t frame = r.U32();
++                Pad pad = r.PadV();
++                if (r.ok && mPhase == Phase::InGame && slotIndex < mPlayerCount) {
++                    StoreInput(frame, slotIndex, pad);
++                }
++                break;
++            }
++            case MSG_HASH: {
++                uint32_t frame = r.U32();
++                uint32_t hash = r.U32();
++                if (r.ok && mPhase == Phase::InGame) {
++                    RecordHash(frame, slotIndex, hash);
++                }
++                break;
++            }
++            case MSG_PROFILE: {
++                uint8_t profile = r.U8();
++                if (r.ok && mPhase == Phase::Lobby) {
++                    mPlayers[slotIndex].profile = profile;
++                    BroadcastLobby();
++                }
++                break;
++            }
++            case MSG_BYE:
++                c.closing = true;
++                break;
++            default:
++                break;
++        }
++        return;
++    }
++
++    // ---- client ----
++    switch (type) {
++        case MSG_WELCOME:
++            mLocalSlot = r.U8();
++            mPhase = Phase::Lobby;
++            mStatus = "Connected as player " + std::to_string(mLocalSlot + 1) + " - waiting for host";
++            {
++                Writer w;
++                w.U8(mLocalProfile);
++                SendTo(c, MSG_PROFILE, w.buf);
++            }
++            break;
++        case MSG_REJECT:
++        case MSG_BYE: {
++            std::string reason = r.Str();
++            if (reason.empty()) {
++                reason = "Host closed the session";
++            }
++            mPendingFail = (type == MSG_REJECT ? "Rejected: " : "") + reason;
++            c.closing = true;
++            break;
++        }
++        case MSG_LOBBY: {
++            mInputDelay = r.U8();
++            mLobbyOptions = r.U8();
++            for (auto& p : mPlayers) {
++                p.connected = r.U8() != 0;
++                p.name = r.Str();
++                p.profile = r.U8();
++            }
++            break;
++        }
++        case MSG_START: {
++            int slot = r.U8();
++            int count = r.U8();
++            int delay = r.U8();
++            std::vector<uint8_t> state = r.Blob();
++            if (!r.ok || count < 1 || count > kMaxPlayers || slot >= count) {
++                mPendingFail = "Malformed start message";
++                c.closing = true;
++                break;
++            }
++            std::string err;
++            if (mHooks.applyStartState && !mHooks.applyStartState(state, err)) {
++                mPendingFail = "Could not apply host settings: " + err;
++                c.closing = true;
++                break;
++            }
++            BeginInGame(slot, count, delay);
++            mStartPending = true;
++            break;
++        }
++        case MSG_FRAME: {
++            uint32_t frame = r.U32();
++            int n = r.U8();
++            FramePads pads{};
++            for (int i = 0; i < n && i < kMaxPlayers; i++) {
++                pads[i] = r.PadV();
++            }
++            if (r.ok && mPhase == Phase::InGame) {
++                StoreFrame(frame, pads);
++            }
++            break;
++        }
++        case MSG_DESYNC: {
++            uint32_t frame = r.U32();
++            if (mDesyncFrame == UINT32_MAX) {
++                mDesyncFrame = frame;
++            }
++            break;
++        }
++        default:
++            break;
++    }
++}
++
++// ------------------------------------------------------------------ pumping
++
++bool Session::Update() {
++    if (mRole == Role::None) {
++        return false;
++    }
++
++    if (mRole == Role::Host) {
++        AcceptNewClients();
++        for (int i = 1; i < kMaxPlayers; i++) {
++            Conn* c = mConns[i];
++            if (c == nullptr) {
++                continue;
++            }
++            if (!PumpConn(*c, i)) {
++                if (mRole == Role::None) {
++                    return false;
++                }
++                bool wasPlayer = c->handshaken;
++                std::string who = mPlayers[i].name;
++                delete c;
++                mConns[i] = nullptr;
++                mPlayers[i] = {};
++                if (wasPlayer && mPhase == Phase::InGame && i < mPlayerCount) {
++                    Fail(who + " disconnected");
++                    return false;
++                }
++                if (wasPlayer) {
++                    BroadcastLobby();
++                    mStatus = "Lobby: " + std::to_string(PlayerCount()) + " players";
++                }
++            }
++        }
++
++        if (mStartRequested && mPhase == Phase::Lobby) {
++            mStartRequested = false;
++            if (PlayerCount() < 2) {
++                return false;
++            }
++            // Pack players into slots 0..n-1 so the game sees P1..Pn.
++            std::array<Conn*, kMaxPlayers> packed{};
++            std::array<PlayerInfo, kMaxPlayers> packedInfo{};
++            packedInfo[0] = mPlayers[0];
++            int n = 1;
++            for (int i = 1; i < kMaxPlayers; i++) {
++                if (mConns[i] != nullptr && mConns[i]->handshaken) {
++                    packed[n] = mConns[i];
++                    packedInfo[n] = mPlayers[i];
++                    n++;
++                } else if (mConns[i] != nullptr) {
++                    // Half-open connection that never said hello: drop it.
++                    delete mConns[i];
++                }
++            }
++            mConns = packed;
++            mPlayers = packedInfo;
++            BroadcastLobby(); // clients learn the final P1..Pn names
++
++            std::vector<uint8_t> state = mHooks.captureStartState ? mHooks.captureStartState() : std::vector<uint8_t>{};
++            for (int i = 1; i < n; i++) {
++                Writer w;
++                w.U8((uint8_t) i);
++                w.U8((uint8_t) n);
++                w.U8((uint8_t) mInputDelay);
++                w.Blob(state);
++                SendTo(*mConns[i], MSG_START, w.buf);
++            }
++            BeginInGame(0, n, mInputDelay);
++            return true;
++        }
++        return false;
++    }
++
++    // ---- client ----
++    Conn* host = mConns[0];
++    if (host == nullptr) {
++        return false;
++    }
++    if (mPhase == Phase::Connecting && host->connecting && NowSeconds() - mConnectStarted > mTimeoutSeconds) {
++        Fail("Timed out connecting to host");
++        return false;
++    }
++    if (!PumpConn(*host, 0)) {
++        if (mRole == Role::None) {
++            return false;
++        }
++        std::string reason = mPendingFail;
++        mPendingFail.clear();
++        if (reason.empty()) {
++            reason = mPhase == Phase::Connecting ? "Could not connect to host" : "Lost connection to host";
++        }
++        Fail(reason);
++        return false;
++    }
++    if (mStartPending) {
++        mStartPending = false;
++        mStatus = "In game as player " + std::to_string(mLocalSlot + 1);
++        return true;
++    }
++    return false;
++}
++
++bool Session::WaitForNetwork(int timeoutMs) {
++    fd_set rset;
++    FD_ZERO(&rset);
++    intptr_t maxFd = -1;
++    auto add = [&](intptr_t s) {
++        if (s != -1) {
++            FD_SET(NS(s), &rset);
++            maxFd = std::max(maxFd, s);
++        }
++    };
++    add(mListenSock);
++    for (auto* c : mConns) {
++        if (c != nullptr) {
++            add(c->sock);
++        }
++    }
++    if (maxFd == -1) {
++        return false;
++    }
++    timeval tv{ timeoutMs / 1000, (timeoutMs % 1000) * 1000 };
++    return select((int) maxFd + 1, &rset, nullptr, nullptr, &tv) > 0;
++}
++
++// ------------------------------------------------------------------ lockstep
++
++void Session::BeginInGame(int slot, int playerCount, int inputDelay) {
++    mLocalSlot = slot;
++    mPlayerCount = playerCount;
++    mInputDelay = std::clamp(inputDelay, 0, kMaxInputDelay);
++    mFrame = 0;
++    mDesyncFrame = UINT32_MAX;
++    mPhase = Phase::InGame;
++    std::fill(mInputs.begin(), mInputs.end(), InputSlot{});
++    std::fill(mHashes.begin(), mHashes.end(), HashSlot{});
++    // Nobody has input for the first `delay` frames: everyone starts neutral.
++    for (uint32_t f = 0; f < (uint32_t) mInputDelay; f++) {
++        InputSlot& s = SlotFor(f);
++        s.haveMask = ExpectedMask();
++    }
++    if (mRole == Role::Host) {
++        mStatus = "In game - " + std::to_string(playerCount) + " players";
++    }
++}
++
++uint8_t Session::ExpectedMask() const {
++    return (uint8_t) ((1u << mPlayerCount) - 1);
++}
++
++Session::InputSlot& Session::SlotFor(uint32_t frame) {
++    InputSlot& s = mInputs[frame % kRing];
++    if (s.frame != frame) {
++        s = InputSlot{};
++        s.frame = frame;
++    }
++    return s;
++}
++
++void Session::StoreInput(uint32_t frame, int player, const Pad& pad) {
++    // Ignore stale or wildly-ahead frames; the ring only holds a window.
++    if (frame < mFrame || frame >= mFrame + kRing / 2) {
++        return;
++    }
++    InputSlot& s = SlotFor(frame);
++    s.pads[player] = pad;
++    s.haveMask |= (uint8_t) (1u << player);
++}
++
++void Session::StoreFrame(uint32_t frame, const FramePads& pads) {
++    if (frame < mFrame || frame > mFrame + kRing / 2) {
++        return;
++    }
++    InputSlot& s = SlotFor(frame);
++    s.pads = pads;
++    s.haveMask = ExpectedMask();
++}
++
++void Session::RecordHash(uint32_t frame, int player, uint32_t hash) {
++    HashSlot& h = mHashes[(frame / std::max<uint32_t>(mHashInterval, 1)) % kRing];
++    if (h.frame != frame) {
++        h = HashSlot{};
++        h.frame = frame;
++    }
++    h.hash[player] = hash;
++    h.haveMask |= (uint8_t) (1u << player);
++    if (h.haveMask != ExpectedMask() || mDesyncFrame != UINT32_MAX) {
++        return;
++    }
++    for (int i = 1; i < mPlayerCount; i++) {
++        if (h.hash[i] != h.hash[0]) {
++            mDesyncFrame = frame;
++            Writer w;
++            w.U32(frame);
++            Broadcast(MSG_DESYNC, w.buf);
++            return;
++        }
++    }
++}
++
++bool Session::ExchangeInputs(const Pad& local, FramePads& out) {
++    if (mPhase != Phase::InGame) {
++        return false;
++    }
++
++    // 1. Publish our input for a few frames in the future.
++    uint32_t target = mFrame + (uint32_t) mInputDelay;
++    if (mRole == Role::Host) {
++        StoreInput(target, 0, local);
++    } else {
++        Writer w;
++        w.U32(target);
++        w.PadV(local);
++        SendTo(*mConns[0], MSG_INPUT, w.buf);
++    }
++
++    // 2. Periodic desync check on the state *before* this frame runs.
++    if (mHooks.stateHash && mHashInterval > 0 && mFrame % mHashInterval == 0) {
++        uint32_t h = mHooks.stateHash();
++        if (mRole == Role::Host) {
++            RecordHash(mFrame, 0, h);
++        } else {
++            Writer w;
++            w.U32(mFrame);
++            w.U32(h);
++            SendTo(*mConns[0], MSG_HASH, w.buf);
++        }
++    }
++
++    // 3. Wait for everybody's input for the current frame.
++    double start = NowSeconds();
++    for (;;) {
++        Update();
++        if (mPhase != Phase::InGame) {
++            return false; // dropped while waiting
++        }
++        InputSlot& s = SlotFor(mFrame);
++        if (s.haveMask == ExpectedMask()) {
++            break;
++        }
++        double waited = NowSeconds() - start;
++        if (waited > mTimeoutSeconds) {
++            std::string who;
++            for (int i = 0; i < mPlayerCount; i++) {
++                if (!(s.haveMask & (1u << i))) {
++                    who = mPlayers[i].name.empty() ? "player " + std::to_string(i + 1) : mPlayers[i].name;
++                    break;
++                }
++            }
++            Fail("Timed out waiting for " + (who.empty() ? std::string("the host") : who));
++            return false;
++        }
++        WaitForNetwork(2);
++    }
++    mLastStallMs = (NowSeconds() - start) * 1000.0;
++
++    InputSlot& s = SlotFor(mFrame);
++    if (mRole == Role::Host) {
++        Writer w;
++        w.U32(mFrame);
++        w.U8((uint8_t) mPlayerCount);
++        for (int i = 0; i < mPlayerCount; i++) {
++            w.PadV(s.pads[i]);
++        }
++        Broadcast(MSG_FRAME, w.buf);
++    }
++    out = s.pads;
++    for (int i = mPlayerCount; i < kMaxPlayers; i++) {
++        out[i] = Pad{};
++    }
++    mFrame++;
++    return true;
++}
++
++} // namespace Netplay
+diff --git a/src/port/netplay/NetplayCore.h b/src/port/netplay/NetplayCore.h
+new file mode 100644
+index 0000000..e63af88
+--- /dev/null
++++ b/src/port/netplay/NetplayCore.h
+@@ -0,0 +1,187 @@
++#pragma once
++
++// LAN netplay core: TCP transport + deterministic lockstep input sync.
++//
++// Topology is a star: one host, up to three clients. Every machine runs the
++// full game simulation. Each frame, every player's controller input is sent to
++// the host; the host bundles the inputs for a frame and relays the bundle to
++// everyone. A frame only runs once its bundle is complete, so all machines feed
++// the game identical inputs on identical frames and the simulations stay in step.
++//
++// This file knows nothing about Mario Kart. Game-specific state (RNG seed, menu
++// cursors, gameplay settings, desync hashes) is plugged in through Hooks.
++
++#include <array>
++#include <cstdint>
++#include <functional>
++#include <string>
++#include <vector>
++
++namespace Netplay {
++
++constexpr int kMaxPlayers = 8;
++constexpr uint16_t kDefaultPort = 27064;
++constexpr int kMaxInputDelay = 8;
++
++// Lobby option bits used by the game (Session::LobbyOptions()).
++constexpr uint8_t kOptionSplitScreen = 1; // classic couch split-screen, max 4 players
++                                          // (otherwise: big race, own screen per PC, up to 8)
++
++struct Pad {
++    uint32_t button = 0;
++    int8_t stickX = 0;
++    int8_t stickY = 0;
++    int8_t rightStickX = 0;
++    int8_t rightStickY = 0;
++
++    bool operator==(const Pad& o) const {
++        return button == o.button && stickX == o.stickX && stickY == o.stickY && rightStickX == o.rightStickX &&
++               rightStickY == o.rightStickY;
++    }
++};
++using FramePads = std::array<Pad, kMaxPlayers>;
++
++enum class Role { None, Host, Client };
++enum class Phase {
++    Idle,       // not connected
++    Connecting, // client: TCP connect / handshake in progress
++    Lobby,      // connected, waiting for the host to start
++    InGame,     // lockstep running
++};
++
++struct Hooks {
++    // Bytes that must match on every machine for a session to be allowed
++    // (protocol version, platform, unlocks...). Host rejects mismatches.
++    std::function<std::vector<uint8_t>()> compatBlob;
++    // Human readable explanation of why two compat blobs differ.
++    std::function<std::string(const std::vector<uint8_t>& host, const std::vector<uint8_t>& client)> describeMismatch;
++    // Host: capture the state every client must adopt before frame 0.
++    std::function<std::vector<uint8_t>()> captureStartState;
++    // Client: adopt the host's start state. Return false (and set err) to abort.
++    std::function<bool(const std::vector<uint8_t>& state, std::string& err)> applyStartState;
++    // Hash of the simulation state, checked periodically to detect desyncs.
++    std::function<uint32_t()> stateHash;
++    // Called when a session ends (for whatever reason) so the game can restore
++    // anything it overrode.
++    std::function<void()> onSessionEnd;
++};
++
++struct PlayerInfo {
++    bool connected = false;
++    std::string name;
++    // Small per-player choice shared through the lobby (the game uses it for
++    // the player's character).
++    uint8_t profile = 0;
++};
++
++class Session {
++  public:
++    Session();
++    ~Session();
++
++    void SetHooks(Hooks hooks) { mHooks = std::move(hooks); }
++
++    // --- control (UI thread == game thread) ---
++    bool Host(uint16_t port, const std::string& name);
++    bool Join(const std::string& address, uint16_t port, const std::string& name);
++    void Disconnect(const std::string& reason = "");
++    // Host only: start the match on the next Update().
++    bool RequestStart();
++    void SetInputDelay(int frames);
++    // This player's lobby choice (see PlayerInfo::profile).
++    void SetLocalProfile(uint8_t profile);
++    // Host only: match options shown to everyone in the lobby.
++    void SetLobbyOptions(uint8_t options);
++    uint8_t LobbyOptions() const { return mLobbyOptions; }
++
++    // --- per frame ---
++    // Pump the network. Returns true exactly once when the synced session
++    // starts; the caller must then put the game into its known start state
++    // before running the next frame (which is lockstep frame 0).
++    bool Update();
++    // Exchange inputs for the frame about to run. `local` is this machine's
++    // controller. On success `out` holds every player's input for this frame.
++    // Blocks (up to the timeout) until all inputs for the frame have arrived.
++    // Returns false if netplay is not in-game or the session dropped.
++    bool ExchangeInputs(const Pad& local, FramePads& out);
++
++    // --- status ---
++    Role GetRole() const { return mRole; }
++    Phase GetPhase() const { return mPhase; }
++    bool IsInGame() const { return mPhase == Phase::InGame; }
++    int LocalSlot() const { return mLocalSlot; }
++    int PlayerCount() const;
++    int InputDelay() const { return mInputDelay; }
++    uint32_t CurrentFrame() const { return mFrame; }
++    const std::array<PlayerInfo, kMaxPlayers>& Players() const { return mPlayers; }
++    const std::string& StatusText() const { return mStatus; }
++    const std::string& LastError() const { return mLastError; }
++    bool HasDesynced() const { return mDesyncFrame != UINT32_MAX; }
++    uint32_t DesyncFrame() const { return mDesyncFrame; }
++    double LastStallMs() const { return mLastStallMs; }
++
++    // Seconds to wait for a frame's inputs before giving up on the session.
++    double mTimeoutSeconds = 5.0;
++    // How often (frames) to compare state hashes.
++    uint32_t mHashInterval = 30;
++
++  private:
++    struct Conn;
++    struct InputSlot {
++        uint32_t frame = UINT32_MAX;
++        uint8_t haveMask = 0;
++        FramePads pads{};
++    };
++    static constexpr uint32_t kRing = 256;
++
++    void ResetState();
++    void Fail(const std::string& reason);
++    void AcceptNewClients();
++    bool PumpConn(Conn& c, int slotIndex);
++    void HandleMessage(Conn& c, int slotIndex, uint8_t type, const uint8_t* data, size_t len);
++    void SendTo(Conn& c, uint8_t type, const std::vector<uint8_t>& payload);
++    void Broadcast(uint8_t type, const std::vector<uint8_t>& payload);
++    void BroadcastLobby();
++    bool WaitForNetwork(int timeoutMs);
++    void BeginInGame(int slot, int playerCount, int inputDelay);
++    InputSlot& SlotFor(uint32_t frame);
++    void StoreInput(uint32_t frame, int player, const Pad& pad);
++    void StoreFrame(uint32_t frame, const FramePads& pads);
++    void RecordHash(uint32_t frame, int player, uint32_t hash);
++    uint8_t ExpectedMask() const;
++
++    Hooks mHooks;
++    Role mRole = Role::None;
++    Phase mPhase = Phase::Idle;
++    int mLocalSlot = 0;
++    int mPlayerCount = 0; // fixed once in game
++    int mInputDelay = 2;
++    uint32_t mFrame = 0;
++    bool mStartRequested = false;
++    bool mStartPending = false; // client: START applied, report on next Update
++    std::string mLocalName;
++    uint8_t mLocalProfile = 0;
++    uint8_t mLobbyOptions = 0;
++    std::string mStatus;
++    std::string mLastError;
++    uint32_t mDesyncFrame = UINT32_MAX;
++    double mLastStallMs = 0.0;
++    double mConnectStarted = 0.0;
++    std::string mPendingFail; // client: reason the host gave for closing
++
++    intptr_t mListenSock = -1;
++    std::array<Conn*, kMaxPlayers> mConns{}; // host: index = slot (0 unused); client: [0] = host
++    std::array<PlayerInfo, kMaxPlayers> mPlayers{};
++    std::vector<InputSlot> mInputs;
++    struct HashSlot {
++        uint32_t frame = UINT32_MAX;
++        uint8_t haveMask = 0;
++        std::array<uint32_t, kMaxPlayers> hash{};
++    };
++    std::vector<HashSlot> mHashes;
++};
++
++// Process-wide session used by the game.
++Session& Get();
++
++} // namespace Netplay
+diff --git a/src/port/netplay/netrace.c b/src/port/netplay/netrace.c
+new file mode 100644
+index 0000000..4a7a49d
+--- /dev/null
++++ b/src/port/netplay/netrace.c
+@@ -0,0 +1,174 @@
++#include "netrace.h"
++
++#include <macros.h>
++#include <common_structs.h>
++#include <defines.h>
++#include "main.h"
++#include "camera.h"
++#include "code_800029B0.h"
++#include "spawn_players.h"
++#include "menus.h"
++
++s32 gNetBigRace = 0;
++s32 gNetHumanCount = 0;
++s8 gNetCharacters[NETRACE_MAX_HUMANS] = { 0 };
++s32 gNetViewPlayer = 0;
++
++// Inputs for players 5-8. Kept apart from gControllers[4..7], which the stock
++// game uses for "any controller" input and for time-trial ghost replays.
++static struct Controller sExtraControllers[NETRACE_MAX_HUMANS - 4];
++
++// Ticks spent waiting for the last humans to finish after the first one did.
++static s32 sFinishWaitTicks = 0;
++// ~45 seconds at the game's 60 logic ticks per second.
++#define NETRACE_FINISH_TIMEOUT_TICKS (60 * 45)
++
++bool netrace_active(void) {
++    return gNetBigRace && (gNetHumanCount > 0) && (gModeSelection == GRAND_PRIX) &&
++           (gScreenModeSelection == SCREEN_MODE_1P) && (gPlayerCountSelection1 == 1) && !gDemoMode;
++}
++
++bool netrace_is_remote_human(s32 playerId) {
++    return netrace_active() && (playerId > 0) && (playerId < gNetHumanCount) && (playerId < NUM_PLAYERS);
++}
++
++s32 netrace_human_loop_count(void) {
++    if (netrace_active()) {
++        return gNetHumanCount;
++    }
++    return gPlayerCountSelection1;
++}
++
++s32 netrace_view_player(void) {
++    if (netrace_active() && gNetViewPlayer > 0 && gNetViewPlayer < gNetHumanCount) {
++        return gNetViewPlayer;
++    }
++    return 0;
++}
++
++struct Controller* get_player_controller(s32 playerId) {
++    if (playerId >= 4 && playerId < NETRACE_MAX_HUMANS) {
++        return &sExtraControllers[playerId - 4];
++    }
++    if (playerId < 0 || playerId >= NUM_PLAYERS) {
++        return &gControllers[0];
++    }
++    return &gControllers[playerId];
++}
++
++// Mirrors update_controller() in main.c for players 5-8.
++void netrace_set_extra_pad(s32 index, u16 button, s8 stickX, s8 stickY) {
++    struct Controller* controller;
++    u16 stick;
++
++    if (index < 0 || index >= NETRACE_MAX_HUMANS - 4) {
++        return;
++    }
++    controller = &sExtraControllers[index];
++    controller->rawStickX = stickX;
++    controller->rawStickY = stickY;
++    controller->rightRawStickX = 0;
++    controller->rightRawStickY = 0;
++    if ((button & 4) != 0) {
++        button |= Z_TRIG;
++    }
++    controller->buttonPressed = button & (button ^ controller->button);
++    controller->buttonDepressed = controller->button & (button ^ controller->button);
++    controller->button = button;
++
++    stick = 0;
++    if (controller->rawStickX < -50) {
++        stick |= L_JPAD;
++    }
++    if (controller->rawStickX > 50) {
++        stick |= R_JPAD;
++    }
++    if (controller->rawStickY < -50) {
++        stick |= D_JPAD;
++    }
++    if (controller->rawStickY > 50) {
++        stick |= U_JPAD;
++    }
++    controller->stickPressed = stick & (stick ^ controller->stickDirection);
++    controller->stickDepressed = controller->stickDirection & (stick ^ controller->stickDirection);
++    controller->stickDirection = stick;
++}
++
++// Called by the 1P Grand Prix spawn before karts are created. chooseCPUPlayers[k - 1]
++// is the character of kart k. Human karts get their player's pick; the
++// remaining CPU karts keep their character unless a human took it, in which
++// case they get the next free one. Same inputs on every PC, same grid.
++void netrace_prepare_grid(void) {
++    bool used[8] = { false };
++    s32 k;
++    s32 next;
++
++    sFinishWaitTicks = 0;
++    if (!netrace_active()) {
++        return;
++    }
++    used[gCharacterSelections[0] & 7] = true;
++    for (k = 1; k < gNetHumanCount && k < NUM_PLAYERS; k++) {
++        chooseCPUPlayers[k - 1] = gNetCharacters[k] & 7;
++        used[chooseCPUPlayers[k - 1]] = true;
++    }
++    for (k = gNetHumanCount; k < NUM_PLAYERS; k++) {
++        s16 c = chooseCPUPlayers[k - 1] & 7;
++        if (used[c]) {
++            for (next = 0; next < 8 && used[next]; next++) {
++            }
++            // With duplicate human picks there are always free characters;
++            // with 8 humans this loop is never reached.
++            c = (s16) (next & 7);
++        }
++        chooseCPUPlayers[k - 1] = c;
++        used[c] = true;
++    }
++}
++
++void netrace_spawn_humans(void) {
++    s32 k;
++
++    if (!netrace_active()) {
++        return;
++    }
++    for (k = 1; k < gNetHumanCount && k < NUM_PLAYERS; k++) {
++        Player* player = &gPlayers[k];
++        player->type = (player->type & ~PLAYER_CPU) | PLAYER_HUMAN;
++    }
++}
++
++// In a 1P race the second screen context's camera only serves the end-of-race
++// shot. Each PC points it at its own kart and renders through it, so the
++// cameras that game logic consults (camera 0, following P1) stay identical
++// everywhere.
++void netrace_attach_view_camera(void) {
++    s32 view = netrace_view_player();
++    Camera* camera = gScreenContexts[PLAYER_TWO].raceCamera;
++
++    if (view == 0 || camera == NULL) {
++        return;
++    }
++    camera->playerId = view;
++}
++
++bool netrace_all_humans_finished(void) {
++    s32 k;
++
++    if (!netrace_active()) {
++        return true;
++    }
++    if (++sFinishWaitTicks >= NETRACE_FINISH_TIMEOUT_TICKS) {
++        return true;
++    }
++    for (k = 0; k < gNetHumanCount && k < NUM_PLAYERS; k++) {
++        if ((gPlayers[k].type & PLAYER_EXISTS) && !(gPlayers[k].type & PLAYER_CINEMATIC_MODE)) {
++            return false;
++        }
++    }
++    return true;
++}
++
++void netrace_reset_finish_timer(void) {
++    sFinishWaitTicks = 0;
++}
+diff --git a/src/port/netplay/netrace.h b/src/port/netplay/netrace.h
+new file mode 100644
+index 0000000..3289998
+--- /dev/null
++++ b/src/port/netplay/netrace.h
+@@ -0,0 +1,56 @@
++#ifndef SPAGHETTI_NETRACE_H
++#define SPAGHETTI_NETRACE_H
++
++// "Big race": a LAN netplay Grand Prix with up to 8 human drivers, one per PC.
++//
++// The simulation is the stock 1-player Grand Prix (8 karts) on every PC, with
++// karts 2..N switched from CPU to human control by players on other PCs. Each
++// PC then renders its own kart full-screen. Everything here is a no-op unless
++// netplay switched big-race mode on.
++
++#include <libultraship.h>
++#include <stdbool.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++struct Controller;
++
++#define NETRACE_MAX_HUMANS 8
++
++// Set from the netplay start state (identical on every PC).
++extern s32 gNetBigRace;                        // 1 when the match uses big-race mode
++extern s32 gNetHumanCount;                     // human drivers, 1..8
++extern s8 gNetCharacters[NETRACE_MAX_HUMANS];  // characters for drivers 2..8 ([0] unused: P1 uses the menu)
++// Local, render-only: which kart this PC shows. Never read by game logic.
++extern s32 gNetViewPlayer;
++
++// True while a big-race Grand Prix is actually running (1P Grand Prix selected).
++bool netrace_active(void);
++// True if gPlayers[playerId] is driven by a netplay human (P2..P8).
++bool netrace_is_remote_human(s32 playerId);
++// Number of human players the per-human logic should process.
++s32 netrace_human_loop_count(void);
++// Kart shown on this PC's screen (0 when big race is off).
++s32 netrace_view_player(void);
++
++// Controller for any player index 0..7. Players 1-4 use gControllers as
++// always; players 5-8 use separate storage so gControllers[4..7] keep their
++// stock roles (combined input, ghost replays).
++struct Controller* get_player_controller(s32 playerId);
++// Feed players 5-8's raw inputs for this frame.
++void netrace_set_extra_pad(s32 index, u16 button, s8 stickX, s8 stickY);
++
++// Hooks called from the race code.
++void netrace_prepare_grid(void);          // before the 1P GP spawn: characters for every kart
++void netrace_spawn_humans(void);          // after the 1P GP spawn: CPU -> human for P2..PN
++void netrace_attach_view_camera(void);    // after cameras spawn: point the spare camera at our kart
++bool netrace_all_humans_finished(void);   // race end gate
++void netrace_reset_finish_timer(void);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+diff --git a/src/port/ui/ImguiUI.cpp b/src/port/ui/ImguiUI.cpp
+index 0d1342c..1aba409 100644
+--- a/src/port/ui/ImguiUI.cpp
++++ b/src/port/ui/ImguiUI.cpp
+@@ -2,6 +2,7 @@
+ #include "UIWidgets.h"
+ #include "ResolutionEditor.h"
+ #include "FreecamWindow.h"
++#include "NetplayWindow.h"
+ #include "Tools.h"
+ #include "SceneExplorer.h"
+ #include "Properties.h"
+@@ -39,6 +40,7 @@ std::shared_ptr<Ship::GuiWindow> mSceneExplorerWindow;
+ std::shared_ptr<Ship::GuiWindow> mPropertiesWindow;
+ std::shared_ptr<Ship::GuiWindow> mTrackPropertiesWindow;
+ std::shared_ptr<Ship::GuiWindow> mContentBrowserWindow;
++std::shared_ptr<Ship::GuiWindow> mNetplayWindow;
+ 
+ void SetupGuiElements() {
+     auto gui = Ship::Context::GetRawInstance()->GetWindow()->GetGui();
+@@ -86,6 +88,9 @@ void SetupGuiElements() {
+     mContentBrowserWindow =
+         std::make_shared<TrackEditor::ContentBrowserWindow>("gEditorEnabled", "Content Browser");
+     gui->AddGuiWindow(mContentBrowserWindow);
++
++    mNetplayWindow = std::make_shared<NetplayWindow>("gNetplay.WindowOpen", "Netplay", ImVec2(440, 420));
++    gui->AddGuiWindow(mNetplayWindow);
+ }
+ 
+ void Destroy() {
+@@ -97,6 +102,7 @@ void Destroy() {
+     mPropertiesWindow = nullptr;
+     mTrackPropertiesWindow = nullptr;
+     mContentBrowserWindow = nullptr;
++    mNetplayWindow = nullptr;
+ }
+ 
+ std::string GetWindowButtonText(const char* text, bool menuOpen) {
+diff --git a/src/port/ui/NetplayWindow.cpp b/src/port/ui/NetplayWindow.cpp
+new file mode 100644
+index 0000000..0317139
+--- /dev/null
++++ b/src/port/ui/NetplayWindow.cpp
+@@ -0,0 +1,230 @@
++#include "NetplayWindow.h"
++
++#include <imgui.h>
++#include <algorithm>
++#include <cstring>
++#include <string>
++
++#include "port/netplay/NetplayCore.h"
++
++namespace Netplay {
++void InstallGameHooks();
++}
++
++namespace GameUI {
++
++namespace {
++char sName[32] = "";
++char sAddress[64] = "";
++int sPort = Netplay::kDefaultPort;
++int sDelay = 2;
++int sCharacter = 1;
++int sSplitScreen = 0;
++
++const char* kCharacterNames[8] = { "Mario", "Luigi", "Yoshi", "Toad", "Donkey Kong", "Wario", "Peach", "Bowser" };
++
++const ImVec4 kRed(1.0f, 0.35f, 0.35f, 1.0f);
++const ImVec4 kGreen(0.45f, 0.9f, 0.45f, 1.0f);
++const ImVec4 kGrey(0.65f, 0.65f, 0.65f, 1.0f);
++
++void SaveSettings() {
++    CVarSetString("gNetplay.Name", sName);
++    CVarSetString("gNetplay.Address", sAddress);
++    CVarSetInteger("gNetplay.Port", sPort);
++    CVarSetInteger("gNetplay.InputDelay", sDelay);
++    CVarSetInteger("gNetplay.Character", sCharacter);
++    CVarSave();
++}
++
++// Character for big races (P1 / the host picks theirs in the game's menu).
++void DrawCharacterPicker(Netplay::Session& s) {
++    if (ImGui::Combo("Your character", &sCharacter, kCharacterNames, 8)) {
++        s.SetLocalProfile((uint8_t) sCharacter);
++        SaveSettings();
++    }
++    if (ImGui::IsItemHovered()) {
++        ImGui::SetTooltip("Used in big races for players 2-8.\nThe host (P1) picks in the normal character menu.");
++    }
++}
++
++bool BigRace(const Netplay::Session& s) {
++    return !(s.LobbyOptions() & Netplay::kOptionSplitScreen);
++}
++
++void DrawPlayers(const Netplay::Session& s) {
++    bool bigRace = BigRace(s);
++    if (!ImGui::BeginTable("##netplayers", 3, ImGuiTableFlags_BordersInnerH)) {
++        return;
++    }
++    ImGui::TableSetupColumn("Slot", ImGuiTableColumnFlags_WidthFixed, 40.0f);
++    ImGui::TableSetupColumn("Name");
++    ImGui::TableSetupColumn("Kart", ImGuiTableColumnFlags_WidthFixed, 110.0f);
++    const auto& players = s.Players();
++    for (int i = 0; i < Netplay::kMaxPlayers; i++) {
++        ImGui::TableNextRow();
++        ImGui::TableNextColumn();
++        ImGui::Text("P%d", i + 1);
++        ImGui::TableNextColumn();
++        if (players[i].connected) {
++            bool you = s.GetPhase() != Netplay::Phase::Connecting && i == s.LocalSlot();
++            ImGui::Text("%s%s%s", players[i].name.c_str(), you ? "  (you)" : "", i == 0 ? "  [host]" : "");
++            ImGui::TableNextColumn();
++            if (!bigRace || i == 0) {
++                ImGui::TextColored(kGrey, "game menu");
++            } else {
++                ImGui::TextUnformatted(kCharacterNames[players[i].profile & 7]);
++            }
++        } else {
++            ImGui::TextColored(kGrey, bigRace ? "open (CPU)" : "open");
++            ImGui::TableNextColumn();
++        }
++    }
++    ImGui::EndTable();
++}
++} // namespace
++
++void NetplayWindow::InitElement() {
++    strncpy(sName, CVarGetString("gNetplay.Name", ""), sizeof(sName) - 1);
++    strncpy(sAddress, CVarGetString("gNetplay.Address", "192.168.1.2"), sizeof(sAddress) - 1);
++    sPort = CVarGetInteger("gNetplay.Port", Netplay::kDefaultPort);
++    sDelay = CVarGetInteger("gNetplay.InputDelay", 2);
++    sCharacter = std::clamp(CVarGetInteger("gNetplay.Character", 1), 0, 7);
++}
++
++void NetplayWindow::DrawElement() {
++    Netplay::InstallGameHooks();
++    Netplay::Session& s = Netplay::Get();
++
++    switch (s.GetPhase()) {
++        case Netplay::Phase::Idle: {
++            if (!s.LastError().empty()) {
++                ImGui::PushTextWrapPos(0.0f);
++                ImGui::TextColored(kRed, "%s", s.LastError().c_str());
++                ImGui::PopTextWrapPos();
++                ImGui::Spacing();
++            }
++            ImGui::InputText("Your name", sName, sizeof(sName));
++            DrawCharacterPicker(s);
++            ImGui::InputInt("Port", &sPort);
++            sPort = std::clamp(sPort, 1024, 65535);
++
++            ImGui::SeparatorText("Host a match");
++            ImGui::SliderInt("Input delay (frames)", &sDelay, 0, Netplay::kMaxInputDelay);
++            if (ImGui::IsItemHovered()) {
++                ImGui::SetTooltip("Frames between pressing a button and it taking effect.\n"
++                                  "2 suits wired LAN; raise it if the game stutters over Wi-Fi.");
++            }
++            if (ImGui::Button("Host")) {
++                SaveSettings();
++                s.SetLocalProfile((uint8_t) sCharacter);
++                if (s.Host((uint16_t) sPort, sName)) {
++                    s.SetInputDelay(sDelay);
++                    s.SetLobbyOptions(sSplitScreen ? Netplay::kOptionSplitScreen : 0);
++                }
++            }
++
++            ImGui::SeparatorText("Join a match");
++            ImGui::InputText("Host IP address", sAddress, sizeof(sAddress));
++            if (ImGui::Button("Join")) {
++                SaveSettings();
++                s.SetLocalProfile((uint8_t) sCharacter);
++                s.Join(sAddress, (uint16_t) sPort, sName);
++            }
++            ImGui::Spacing();
++            ImGui::PushTextWrapPos(0.0f);
++            ImGui::TextColored(kGrey, "Everyone needs the same SpaghettiKart build, the same mods/custom tracks, "
++                                      "and the host's port (%d) allowed through the firewall.",
++                               sPort);
++            ImGui::PopTextWrapPos();
++            break;
++        }
++
++        case Netplay::Phase::Connecting:
++            ImGui::TextUnformatted(s.StatusText().c_str());
++            if (ImGui::Button("Cancel")) {
++                s.Disconnect();
++            }
++            break;
++
++        case Netplay::Phase::Lobby: {
++            ImGui::TextUnformatted(s.StatusText().c_str());
++            ImGui::Spacing();
++            DrawPlayers(s);
++            ImGui::Spacing();
++            if (s.GetRole() == Netplay::Role::Host) {
++                ImGui::TextUnformatted("Match type");
++                if (ImGui::RadioButton("Big race - own screen on every PC (up to 8)", sSplitScreen == 0)) {
++                    sSplitScreen = 0;
++                    s.SetLobbyOptions(0);
++                }
++                if (ImGui::RadioButton("Split-screen - classic couch view (up to 4)", sSplitScreen == 1)) {
++                    sSplitScreen = 1;
++                    s.SetLobbyOptions(Netplay::kOptionSplitScreen);
++                }
++                int delay = s.InputDelay();
++                if (ImGui::SliderInt("Input delay (frames)", &delay, 0, Netplay::kMaxInputDelay)) {
++                    sDelay = delay;
++                    s.SetInputDelay(delay);
++                }
++                bool tooMany = !BigRace(s) && s.PlayerCount() > 4;
++                ImGui::BeginDisabled(s.PlayerCount() < 2 || tooMany);
++                if (ImGui::Button("Start match")) {
++                    s.RequestStart();
++                }
++                ImGui::EndDisabled();
++                ImGui::SameLine();
++                if (ImGui::Button("Close lobby")) {
++                    s.Disconnect("Host closed the lobby");
++                }
++                ImGui::PushTextWrapPos(0.0f);
++                if (tooMany) {
++                    ImGui::TextColored(kRed, "Split-screen supports 4 players. Switch to Big race for %d.",
++                                       s.PlayerCount());
++                } else if (BigRace(s)) {
++                    ImGui::TextColored(kGrey,
++                                       "Start sends everyone to the main menu. Choose 1P > Mario GP, then your "
++                                       "character, class and cup. Players 2-%d drive the characters listed above; "
++                                       "empty slots are CPU.",
++                                       std::max(2, s.PlayerCount()));
++                } else {
++                    ImGui::TextColored(kGrey,
++                                       "Start sends everyone to the main menu together. Then pick a %d-player mode "
++                                       "there - P1 (you) drives the menus.",
++                                       std::max(2, s.PlayerCount()));
++                }
++                ImGui::PopTextWrapPos();
++            } else {
++                ImGui::Text("Match type: %s", BigRace(s) ? "Big race (own screen)" : "Split-screen");
++                if (BigRace(s)) {
++                    DrawCharacterPicker(s);
++                }
++                ImGui::Text("Input delay: %d frames", s.InputDelay());
++                if (ImGui::Button("Leave")) {
++                    s.Disconnect();
++                }
++            }
++            break;
++        }
++
++        case Netplay::Phase::InGame: {
++            ImGui::TextColored(kGreen, "Netplay running - you are P%d of %d", s.LocalSlot() + 1, s.PlayerCount());
++            DrawPlayers(s);
++            ImGui::Text("Frame %u   input delay %d   last wait %.1f ms", s.CurrentFrame(), s.InputDelay(),
++                        s.LastStallMs());
++            if (s.HasDesynced()) {
++                ImGui::PushTextWrapPos(0.0f);
++                ImGui::TextColored(kRed,
++                                   "Desync detected at frame %u - the games have drifted apart. "
++                                   "Check everyone has identical settings/builds, then restart the match.",
++                                   s.DesyncFrame());
++                ImGui::PopTextWrapPos();
++            }
++            if (ImGui::Button("Disconnect")) {
++                s.Disconnect();
++            }
++            break;
++        }
++    }
++}
++
++} // namespace GameUI
+diff --git a/src/port/ui/NetplayWindow.h b/src/port/ui/NetplayWindow.h
+new file mode 100644
+index 0000000..f869fbc
+--- /dev/null
++++ b/src/port/ui/NetplayWindow.h
+@@ -0,0 +1,19 @@
++#pragma once
++
++#include <libultraship/libultraship.h>
++
++namespace GameUI {
++
++// Host / join a LAN match and watch its status.
++class NetplayWindow : public Ship::GuiWindow {
++  public:
++    using Ship::GuiWindow::GuiWindow;
++
++  protected:
++    void InitElement() override;
++    void DrawElement() override;
++    void UpdateElement() override {
++    }
++};
++
++} // namespace GameUI
+diff --git a/src/port/ui/PortMenu.cpp b/src/port/ui/PortMenu.cpp
+index 7f06b1e..1b1c1a0 100644
+--- a/src/port/ui/PortMenu.cpp
++++ b/src/port/ui/PortMenu.cpp
+@@ -383,6 +383,13 @@ void PortMenu::AddEnhancements() {
+ 
+     AddRulesets();
+ 
++    path = { "Enhancements", "LAN Netplay", SECTION_COLUMN_1 };
++    AddSidebarEntry("Enhancements", "LAN Netplay", 1);
++    AddWidget(path, "Open Netplay Window", WIDGET_WINDOW_BUTTON)
++        .CVar("gNetplay.WindowOpen")
++        .WindowName("Netplay")
++        .Options(ButtonOptions().Tooltip("Host or join a LAN match with other SpaghettiKart players."));
++
+     path = { "Enhancements", "Cheats", SECTION_COLUMN_1 };
+     AddSidebarEntry("Enhancements", "Cheats", 3);
+     AddWidget(path, "Moon Jump", WIDGET_CVAR_CHECKBOX).CVar("gEnableMoonJump");
+diff --git a/src/racing/actors.c b/src/racing/actors.c
+index b254f97..fe768d6 100644
+--- a/src/racing/actors.c
++++ b/src/racing/actors.c
+@@ -1,4 +1,5 @@
+ #include <libultraship.h>
++#include "port/netplay/netrace.h"
+ #include <libultra/gbi.h>
+ #include <course_offsets.h>
+ #include <macros.h>
+@@ -624,7 +625,8 @@ void evaluate_collision_player_palm_trees(Player* player) {
+ void evaluate_collision_players_palm_trees(void) {
+     s32 index;
+ 
+-    for (index = 0; index < 4; index++) {
++    // Stock: karts 1-4 only. LAN big race: every human driver may be in 5-8.
++    for (index = 0; index < (netrace_active() ? NUM_PLAYERS : 4); index++) {
+         if (((gPlayers[index].type & 0xC000) != 0) &&
+             ((s8) (u8) get_surface_type(gPlayers[index].collision.meshIndexZX) == GRASS)) {
+             evaluate_collision_player_palm_trees(&gPlayers[index]);
+@@ -1135,7 +1137,7 @@ void init_kiwano_fruit(void) {
+     s32 i;
+ 
+     // phi_s0 = 0;
+-    for (i = 0; i < 4; i++) {
++    for (i = 0; i < (netrace_active() ? NUM_PLAYERS : 4); i++) {
+         phi_s1 = &gPlayers[i];
+         // temp_v0 = *phi_s1;
+         if ((phi_s1->type & PLAYER_HUMAN) == 0) {
+diff --git a/src/racing/actors_extended.c b/src/racing/actors_extended.c
+index d226a80..144e5ff 100644
+--- a/src/racing/actors_extended.c
++++ b/src/racing/actors_extended.c
+@@ -1,4 +1,5 @@
+ #include <libultraship.h>
++#include "port/netplay/netrace.h"
+ #include <macros.h>
+ #include <defines.h>
+ #include <actor_types.h>
+@@ -296,7 +297,7 @@ void update_actor_banana_bunch(struct BananaBunchParent* banana_bunch) {
+                 destroy_actor((struct Actor*) banana_bunch);
+                 owner->triggers &= ~DRAG_ITEM_EFFECT;
+             } else if ((owner->type & PLAYER_HUMAN) != 0) {
+-                controller = &gControllers[banana_bunch->playerId];
++                controller = get_player_controller(banana_bunch->playerId);
+                 if ((controller->buttonPressed & Z_TRIG) != 0) {
+                     controller->buttonPressed &= ~Z_TRIG;
+                     func_800C9060(owner - gPlayerOne, SOUND_ARG_LOAD(0x19, 0x00, 0x80, 0x12));
+@@ -427,13 +428,13 @@ void update_actor_triple_shell(TripleShellParent* parent, s16 shellType) {
+                 destroy_actor((struct Actor*) parent);
+                 break;
+             }
+-            if ((gControllers[parent->playerId].buttonPressed & Z_TRIG) != 0) {
++            if ((get_player_controller(parent->playerId)->buttonPressed & Z_TRIG) != 0) {
+                 /**
+                  * Fires shell. Uses += 1.0f because this code is ran multiple times per frame.
+                  * A bool would be turned on and off again resulting in no change
+                  */
+                 parent->firePressed += 1.0f;
+-                gControllers[parent->playerId].buttonPressed &= ~Z_TRIG;
++                get_player_controller(parent->playerId)->buttonPressed &= ~Z_TRIG;
+             }
+             if (parent->firePressed > 0.0f) { // Fires a shell and resets firePressed to zero
+                 if (parent->shellIndices[0] > 0.0f) {
+@@ -975,13 +976,13 @@ void player_use_item(Player* player) {
+ // Check if a player is using an item?
+ void check_player_use_item(void) {
+     Player* player;
+-    struct Controller* target;
+     struct Controller* controller;
+-    struct Controller* loopController;
++    s32 i;
++    // 4 humans normally; up to 8 in a LAN big race.
++    s32 count = netrace_active() ? NUM_PLAYERS : 4;
+ 
+-    for (player = &gPlayers[0], loopController = &gControllers[0], target = &gControllers[4]; loopController != target;
+-         player++, loopController++) {
+-        controller = loopController;
++    for (i = 0, player = &gPlayers[0]; i < count; i++, player++) {
++        controller = get_player_controller(i);
+         if (prevent_item_use(player) == false) {
+             if ((player->type & PLAYER_INVISIBLE_OR_BOMB) != 0) {
+                 if ((player - gPlayerTwo) == 0) {
+diff --git a/src/racing/race_logic.c b/src/racing/race_logic.c
+index 2239b7f..5de0f06 100644
+--- a/src/racing/race_logic.c
++++ b/src/racing/race_logic.c
+@@ -1,4 +1,5 @@
+ #include <libultraship.h>
++#include "port/netplay/netrace.h"
+ #include <stdio.h>
+ #include <macros.h>
+ #include <mk64.h>
+@@ -758,11 +759,11 @@ void func_8028F970(void) {
+         return;
+     }
+ 
+-    //! @todo increasing players past four would require increase this loop iterator.
+-    for (i = 0; i < 4; i++) {
++    // 4 humans normally; up to 8 in a LAN big race.
++    for (i = 0; i < (netrace_active() ? NUM_PLAYERS : 4); i++) {
+ 
+         Player* player = &gPlayers[i];
+-        struct Controller* controller = &gControllers[i];
++        struct Controller* controller = get_player_controller(i);
+ 
+         if (!(player->type & PLAYER_HUMAN)) {
+             continue;
+@@ -771,7 +772,8 @@ void func_8028F970(void) {
+             continue;
+         }
+ 
+-        if (gActiveScreenMode != SCREEN_MODE_3P_4P_SPLITSCREEN) {
++        // The L-button HUD toggle is shared state; in a big race only P1 owns it.
++        if ((gActiveScreenMode != SCREEN_MODE_3P_4P_SPLITSCREEN) && (!netrace_active() || i == 0)) {
+             if ((controller->buttonPressed & L_TRIG) && !(controller->button & R_TRIG)) {
+                 controller->buttonPressed &= 0xFFDF;
+ 
+@@ -786,7 +788,7 @@ void func_8028F970(void) {
+         if ((controller->buttonPressed & START_BUTTON) && (!(controller->button & R_TRIG)) &&
+             (!(controller->button & L_TRIG))) {
+             func_8028DF00();
+-            gIsGamePaused = (controller - gControllerOne) + 1;
++            gIsGamePaused = i + 1;
+             controller->buttonPressed = 0;
+             func_800C9F90(1);
+             gPauseTriggered = 1;
+@@ -968,6 +970,11 @@ void func_8028FCBC(void) {
+ 
+                     switch (gScreenModeSelection) {
+                         case SCREEN_MODE_1P:
++                            // LAN big race: keep racing until every human has
++                            // finished (or the wait times out).
++                            if (!netrace_all_humans_finished()) {
++                                break;
++                            }
+                             D_802BA038 = 690;
+                             gRaceState = RACE_FINISHED;
+                             func_8028E298();
+diff --git a/src/spawn_players.c b/src/spawn_players.c
+index ba21751..fbea120 100644
+--- a/src/spawn_players.c
++++ b/src/spawn_players.c
+@@ -1,4 +1,5 @@
+ #include <defines.h>
++#include "port/netplay/netrace.h"
+ #include <mk64.h>
+ #include <stubs.h>
+ #include <stdio.h>
+@@ -542,6 +543,7 @@ void spawn_players_gp_one_player(f32* arg0, f32* arg1, f32 arg2) {
+     }
+ 
+     D_8016556E = 0;
++    netrace_prepare_grid(); // LAN big race: other players' characters
+     if (gDemoMode == 1) {
+         spawn_player(gPlayerOne, 0, arg0[D_80165270[0]], arg1[D_80165270[0]], arg2, 32768.0f, gCharacterSelections[0],
+                      (PLAYER_HUMAN_AND_CPU));
+@@ -577,6 +579,7 @@ void spawn_players_gp_one_player(f32* arg0, f32* arg1, f32 arg2) {
+                      chooseCPUPlayers[5], (PLAYER_EXISTS | PLAYER_STAGING | PLAYER_START_SEQUENCE | PLAYER_CPU));
+         spawn_player(gPlayerEight, 7, arg0[D_80165270[6]], arg1[D_80165270[7]] + 250.0f, arg2, 32768.0f,
+                      chooseCPUPlayers[6], (PLAYER_EXISTS | PLAYER_STAGING | PLAYER_START_SEQUENCE | PLAYER_CPU));
++        netrace_spawn_humans(); // LAN big race: CPU -> human for drivers 2..N
+         D_80164A28 = 1;
+     }
+     func_80039AE4();
+@@ -1233,6 +1236,7 @@ void spawn_players_and_cameras(void) {
+ 
+     if (gActiveScreenMode == SCREEN_MODE_1P) {
+         spawn_single_player_camera(mode);
++        netrace_attach_view_camera();
+     } else {
+         spawn_multiplayer_cameras(mode);
+     }
+diff --git a/src/update_objects.c b/src/update_objects.c
+index 34b32d5..c6a5af8 100644
+--- a/src/update_objects.c
++++ b/src/update_objects.c
+@@ -1,4 +1,5 @@
+ #include <libultraship.h>
++#include "port/netplay/netrace.h"
+ #include <macros.h>
+ #include <defines.h>
+ #include <decode.h>
+@@ -2510,7 +2511,7 @@ void func_8007B34C(s32 playerId) {
+     temp_s0 = gItemWindowObjectByPlayerId[playerId];
+     sp38 = &gPlayerOne[playerId];
+     sp40 = 0;
+-    new_var = &gControllerOne[playerId];
++    new_var = get_player_controller(playerId);
+     if (new_var->buttonPressed & 0x2000) {
+         sp40 = 1;
+     }
+@@ -3105,7 +3106,7 @@ void func_800842C8(void) {
+     D_8016582C[0] += 0x2000;
+     D_8016582C[1] += 0x1000;
+     D_8016582C[2] += 0x1800;
+-    for (playerId = 0; playerId < gPlayerCountSelection1; playerId++) {
++    for (playerId = 0; playerId < netrace_human_loop_count(); playerId++) {
+         objectIndex = gIndexLakituList[playerId];
+         if (func_80072320(objectIndex, 0x00000020) != 0) {
+             func_800722CC(objectIndex, 0x00000020);
+-- 
+2.43.0
+

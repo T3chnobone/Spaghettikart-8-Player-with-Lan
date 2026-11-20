@@ -29,10 +29,14 @@ have finished.
 **Battle:** 3 balloons each; the last player with balloons wins. Players 1–4
 start on the usual 4-player spots and players 5–8 beside them.
 
-After each race a results panel shows the places and each player's wins this
-session. Any player picks **Race again**, **Change course**, **Change drivers**
-(back to character select with everyone still joined) or **Quit to menu** with
-Up/Down and A. The pause menu works as in a normal VS race.
+After each race the game's own VS / Battle results menu appears, the same one
+a 2-4 player VS race shows: **Retry**, **Course change**, **Driver change**
+(back to character select with everyone still joined) or **Quit**, picked with
+Up/Down and A on any player's controller. With 2-4 players it shows the stock
+character portraits with this session's wins; with 5-8 players it lists every
+player's place, number, driver and wins instead. The menu fades in before it
+takes input, so buttons still being pressed from the race can't pick an
+option. The pause menu works as in a normal VS race.
 
 To get the stock 3P/4P columns back, untick **COUCH PARTY on the main menu**
 in Settings → Local Multiplayer. Couch Party is off during LAN netplay.
@@ -55,10 +59,9 @@ views.
 
 ## Limits (first version, untested on real hardware)
 
-- The results are an overlay panel, not an N64-style screen.
+- The winner's view isn't zoomed to full screen before the results: everyone keeps their own view behind the menu.
 - In Couch Party the cursors are drawn as numbered coloured boxes (the game
   only has cursor art for 1P–4P), for all players alike.
-- The VS win counters on the stock results screens aren't updated.
 - Battle start spots for players 5–8 are offsets from the stock ones; on custom
   battle arenas everyone uses Block Fort's spacing.
 
@@ -67,8 +70,8 @@ views.
 | File | Role |
 | --- | --- |
 | `src/port/couch/CouchParty.{h,cpp}`, `couch.h` | Joining the character screen, controller order, race setup, results. |
-| `src/port/ui/CouchWindow.{h,cpp}` | The results panel. |
+| `src/port/ui/CouchWindow.{h,cpp}` | The old results panel (no longer shown). |
 | `src/menus.c`, `src/menu_items.c` | Third main menu column; 8 cursors on the character screen; hooks into the menu states. |
 | `src/spawn_players.c` | 8-player VS grid and Battle spots. |
-| `src/racing/race_logic.c` | VS finish, Battle eliminations, results instead of the stock zoom. |
+| `src/racing/race_logic.c` | VS finish, Battle eliminations, the stock results menu without the zoom. |
 | `src/player_controller.c`, `src/render_player.c`, `src/code_80057C60.c`, `src/render_objects.c`, `src/code_80005FD0.c`, `src/engine/RaceManager.cpp` | Every couch player drives, is drawn, ranked, on the minimap, and gets VS items. |

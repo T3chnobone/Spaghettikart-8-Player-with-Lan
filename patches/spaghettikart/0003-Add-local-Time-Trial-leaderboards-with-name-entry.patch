@@ -1,0 +1,1156 @@
+From 5af2083b9280c309d4428897465180d78a030e31 Mon Sep 17 00:00:00 2001
+From: T3chnobone <98963290+T3chnobone@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 21:22:03 +0000
+Subject: [PATCH 03/17] Add local Time Trial leaderboards with name entry
+
+Top 10 times per track (custom tracks included), saved in leaderboards.json
+next to the game. After a top-10 Time Trial a window asks for the player's
+name (keyboard, or gamepad arcade-style entry); player 1's controller is held
+from the game while it's open. A Leaderboards window browses every track's
+board and can clear one. Replays and netplay sessions are never recorded.
+
+See docs/LEADERBOARDS.md.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Qq7B1uqfWVWykYRDDMiuXa
+---
+ docs/LEADERBOARDS.md                     |  44 ++++
+ src/main.c                               |   3 +
+ src/port/Game.cpp                        |   2 +
+ src/port/leaderboard/Leaderboard.cpp     | 186 +++++++++++++++
+ src/port/leaderboard/Leaderboard.h       |  54 +++++
+ src/port/leaderboard/LeaderboardGame.cpp | 283 +++++++++++++++++++++++
+ src/port/leaderboard/LeaderboardGame.h   |  40 ++++
+ src/port/leaderboard/leaderboard_game.h  |  25 ++
+ src/port/ui/ImguiUI.cpp                  |  14 ++
+ src/port/ui/LeaderboardWindow.cpp        | 274 ++++++++++++++++++++++
+ src/port/ui/LeaderboardWindow.h          |  34 +++
+ src/port/ui/PortMenu.cpp                 |   7 +
+ src/racing/race_logic.c                  |   4 +
+ 13 files changed, 970 insertions(+)
+ create mode 100644 docs/LEADERBOARDS.md
+ create mode 100644 src/port/leaderboard/Leaderboard.cpp
+ create mode 100644 src/port/leaderboard/Leaderboard.h
+ create mode 100644 src/port/leaderboard/LeaderboardGame.cpp
+ create mode 100644 src/port/leaderboard/LeaderboardGame.h
+ create mode 100644 src/port/leaderboard/leaderboard_game.h
+ create mode 100644 src/port/ui/LeaderboardWindow.cpp
+ create mode 100644 src/port/ui/LeaderboardWindow.h
+
+diff --git a/docs/LEADERBOARDS.md b/docs/LEADERBOARDS.md
+new file mode 100644
+index 0000000..5227fd3
+--- /dev/null
++++ b/docs/LEADERBOARDS.md
+@@ -0,0 +1,44 @@
++# Time Trial Leaderboards
++
++The 10 best Time Trial times for every track, saved on this PC.
++
++## Setting a time
++
++Finish a Time Trial. If your time makes the top 10 for that track, a
++**Time Trial Record** window opens showing your place, total time, lap splits
++and where you'd land on the board.
++
++- **Keyboard:** type your name and press Enter (or click Save).
++- **Gamepad (player 1):** Up/Down change the letter, Left/Right or A/B move
++  between letters, Start saves, Z skips. A on the last letter also saves.
++- **Skip** (or closing the window) discards the time.
++
++While the window is open, player 1's controller only types the name, so the
++results menu behind it waits. Your last name is remembered for next time.
++
++Replays ("watch replay" after a Time Trial) are never recorded. Name entry is
++also off during LAN netplay, so it can't hold up the other PCs.
++
++## Browsing
++
++**Port Menu → Enhancements → Leaderboards → Open Leaderboards.** Pick a track
++to see its board: place, name, time, best lap, driver and date. Custom tracks
++get their own boards; tracks with times that are no longer installed are still
++listed. Each track's times can be cleared, and the name prompt can be turned
++off.
++
++## Storage
++
++`leaderboards.json` in the game folder (next to the saves). It's plain JSON,
++keyed by each track's resource name (e.g. `mk:mario_raceway`), with times in
++hundredths of a second. It's written atomically, so a crash mid-save can't
++corrupt it, and a damaged file is ignored rather than crashing the game.
++
++## Code map
++
++| File | Role |
++| --- | --- |
++| `src/port/leaderboard/Leaderboard.{h,cpp}` | Boards, ranking, JSON load/save, time formatting. No game code. |
++| `src/port/leaderboard/LeaderboardGame.{h,cpp}` | Detects a finished Time Trial, gamepad name entry, saving. |
++| `src/port/ui/LeaderboardWindow.{h,cpp}` | Name entry window and the browse window. |
++| `src/racing/race_logic.c`, `src/main.c`, `src/port/Game.cpp` | Hooks: race finished, controller input, per-frame tick. |
+diff --git a/src/main.c b/src/main.c
+index 4012830..776d262 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -1,6 +1,7 @@
+ #include <libultraship.h>
+ #include "port/localplay/localplay.h"
+ #include "port/netplay/netrace.h"
++#include "port/leaderboard/leaderboard_game.h"
+ #include <libultra/vi.h>
+ #include <libultra/os.h>
+ #include <libultraship/bridge/gfxdebuggerbridge.h>
+@@ -400,6 +401,8 @@ void read_controllers(void) {
+     osContGetReadData(gControllerPads);
+     // LAN netplay: swap in every player's input for this frame (no-op offline).
+     Netplay_ExchangeInputs(gControllerPads);
++    // Time Trial name entry: player 1's controller types instead of driving.
++    leaderboard_filter_pads(gControllerPads);
+     update_controller(0);
+     update_controller(1);
+     update_controller(2);
+diff --git a/src/port/Game.cpp b/src/port/Game.cpp
+index a06e8b9..2db4ca7 100644
+--- a/src/port/Game.cpp
++++ b/src/port/Game.cpp
+@@ -38,6 +38,7 @@
+ extern "C" {
+ #include "port/netplay/netrace.h"
+ #include "port/localplay/localplay.h"
++#include "port/leaderboard/leaderboard_game.h"
+ }
+ 
+ #ifdef _WIN32
+@@ -1004,6 +1005,7 @@ static void ApplyPendingReset() {
+ 
+ void push_frame() {
+     localplay_update(); // local multiplayer settings, gamepads, monitors
++    leaderboard_tick();  // Time Trial leaderboards: name entry after a record
+     if (Netplay_Update()) {
+         // A LAN match starts now: all machines reset to the same state and the
+         // next game frame is lockstep frame 0.
+diff --git a/src/port/leaderboard/Leaderboard.cpp b/src/port/leaderboard/Leaderboard.cpp
+new file mode 100644
+index 0000000..c00b60d
+--- /dev/null
++++ b/src/port/leaderboard/Leaderboard.cpp
+@@ -0,0 +1,186 @@
++#include "Leaderboard.h"
++
++#include <algorithm>
++#include <cstdio>
++#include <filesystem>
++#include <fstream>
++#include <nlohmann/json.hpp>
++
++namespace Leaderboard {
++
++using json = nlohmann::json;
++
++namespace {
++constexpr int kFileVersion = 1;
++}
++
++bool Store::Load(const std::string& path) {
++    mBoards.clear();
++    std::ifstream in(path);
++    if (!in.is_open()) {
++        return false;
++    }
++    json j = json::parse(in, nullptr, false);
++    if (j.is_discarded() || !j.is_object() || !j.contains("tracks") || !j["tracks"].is_object()) {
++        return false;
++    }
++    for (auto& [track, b] : j["tracks"].items()) {
++        if (!b.is_object()) {
++            continue;
++        }
++        Board board;
++        board.trackName = b.value("name", track);
++        if (b.contains("entries") && b["entries"].is_array()) {
++            for (auto& e : b["entries"]) {
++                if (!e.is_object()) {
++                    continue;
++                }
++                Entry entry;
++                entry.name = CleanName(e.value("name", std::string()));
++                entry.timeCs = e.value("time_cs", 0u);
++                entry.character = std::clamp(e.value("character", 0), 0, 7);
++                entry.date = e.value("date", std::string());
++                if (e.contains("laps_cs") && e["laps_cs"].is_array()) {
++                    for (size_t i = 0; i < 3 && i < e["laps_cs"].size(); i++) {
++                        if (e["laps_cs"][i].is_number_unsigned()) {
++                            entry.lapsCs[i] = e["laps_cs"][i].get<uint32_t>();
++                        }
++                    }
++                }
++                if (entry.timeCs > 0) {
++                    board.entries.push_back(entry);
++                }
++            }
++        }
++        std::stable_sort(board.entries.begin(), board.entries.end(),
++                         [](const Entry& a, const Entry& b) { return a.timeCs < b.timeCs; });
++        if (board.entries.size() > kMaxEntries) {
++            board.entries.resize(kMaxEntries);
++        }
++        if (!board.entries.empty()) {
++            mBoards[track] = std::move(board);
++        }
++    }
++    return true;
++}
++
++bool Store::Save(const std::string& path) const {
++    json j;
++    j["version"] = kFileVersion;
++    j["tracks"] = json::object();
++    for (const auto& [track, board] : mBoards) {
++        json b;
++        b["name"] = board.trackName;
++        b["entries"] = json::array();
++        for (const auto& e : board.entries) {
++            b["entries"].push_back({ { "name", e.name },
++                                     { "time_cs", e.timeCs },
++                                     { "laps_cs", { e.lapsCs[0], e.lapsCs[1], e.lapsCs[2] } },
++                                     { "character", e.character },
++                                     { "date", e.date } });
++        }
++        j["tracks"][track] = b;
++    }
++
++    std::string tmp = path + ".tmp";
++    {
++        std::ofstream out(tmp, std::ios::trunc);
++        if (!out.is_open()) {
++            return false;
++        }
++        out << j.dump(2);
++        if (!out.good()) {
++            return false;
++        }
++    }
++    std::error_code ec;
++    std::filesystem::rename(tmp, path, ec);
++    if (ec) {
++        // Some filesystems refuse to rename over an existing file.
++        std::filesystem::remove(path, ec);
++        std::filesystem::rename(tmp, path, ec);
++    }
++    return !ec;
++}
++
++size_t Store::RankFor(const std::string& track, uint32_t timeCs) const {
++    if (timeCs == 0) {
++        return 0;
++    }
++    auto it = mBoards.find(track);
++    if (it == mBoards.end()) {
++        return 1;
++    }
++    const auto& entries = it->second.entries;
++    // Ties go after existing equal times.
++    size_t pos = std::upper_bound(entries.begin(), entries.end(), timeCs,
++                                  [](uint32_t t, const Entry& e) { return t < e.timeCs; }) -
++                 entries.begin();
++    return pos < kMaxEntries ? pos + 1 : 0;
++}
++
++size_t Store::Insert(const std::string& track, const std::string& trackName, Entry entry) {
++    size_t rank = RankFor(track, entry.timeCs);
++    if (rank == 0) {
++        return 0;
++    }
++    entry.name = CleanName(entry.name);
++    entry.character = std::clamp(entry.character, 0, 7);
++    Board& board = mBoards[track];
++    if (!trackName.empty()) {
++        board.trackName = trackName;
++    } else if (board.trackName.empty()) {
++        board.trackName = track;
++    }
++    board.entries.insert(board.entries.begin() + (rank - 1), entry);
++    if (board.entries.size() > kMaxEntries) {
++        board.entries.resize(kMaxEntries);
++    }
++    return rank;
++}
++
++const Board* Store::Get(const std::string& track) const {
++    auto it = mBoards.find(track);
++    return it == mBoards.end() ? nullptr : &it->second;
++}
++
++std::vector<std::string> Store::Tracks() const {
++    std::vector<std::string> out;
++    for (const auto& [track, board] : mBoards) {
++        if (!board.entries.empty()) {
++            out.push_back(track);
++        }
++    }
++    return out;
++}
++
++void Store::Clear(const std::string& track) {
++    mBoards.erase(track);
++}
++
++std::string FormatTime(uint32_t timeCs) {
++    uint32_t minutes = timeCs / 6000;
++    uint32_t seconds = (timeCs / 100) % 60;
++    uint32_t hundredths = timeCs % 100;
++    char buf[32];
++    snprintf(buf, sizeof(buf), "%u'%02u\"%02u", minutes, seconds, hundredths);
++    return buf;
++}
++
++std::string CleanName(const std::string& name) {
++    std::string out;
++    for (char c : name) {
++        if (c >= 32 && c < 127) {
++            out.push_back(c);
++        }
++    }
++    size_t first = out.find_first_not_of(' ');
++    size_t last = out.find_last_not_of(' ');
++    out = first == std::string::npos ? std::string() : out.substr(first, last - first + 1);
++    if (out.size() > kMaxNameLength) {
++        out.resize(kMaxNameLength);
++    }
++    return out.empty() ? "PLAYER" : out;
++}
++
++} // namespace Leaderboard
+diff --git a/src/port/leaderboard/Leaderboard.h b/src/port/leaderboard/Leaderboard.h
+new file mode 100644
+index 0000000..9663085
+--- /dev/null
++++ b/src/port/leaderboard/Leaderboard.h
+@@ -0,0 +1,54 @@
++#pragma once
++
++// Local time-trial leaderboards: the best times per track, kept in a JSON file
++// next to the game. No game code here, so it can be unit tested on its own.
++
++#include <cstdint>
++#include <map>
++#include <string>
++#include <vector>
++
++namespace Leaderboard {
++
++constexpr size_t kMaxEntries = 10;  // per track
++constexpr size_t kMaxNameLength = 12;
++
++struct Entry {
++    std::string name;
++    uint32_t timeCs = 0;          // total race time, hundredths of a second
++    uint32_t lapsCs[3] = { 0, 0, 0 };
++    int character = 0;            // 0..7 (Mario..Bowser)
++    std::string date;             // YYYY-MM-DD
++};
++
++struct Board {
++    std::string trackName;        // display name, for tracks no longer installed
++    std::vector<Entry> entries;   // fastest first
++};
++
++class Store {
++  public:
++    // Loads `path` if it exists. A missing or unreadable file gives an empty store.
++    bool Load(const std::string& path);
++    // Writes atomically (temp file + rename). Returns false on failure.
++    bool Save(const std::string& path) const;
++
++    // 1-based rank `timeCs` would get on `track`, or 0 if it wouldn't make the board.
++    size_t RankFor(const std::string& track, uint32_t timeCs) const;
++    // Adds an entry (if it qualifies) and returns its 1-based rank, or 0.
++    size_t Insert(const std::string& track, const std::string& trackName, Entry entry);
++
++    const Board* Get(const std::string& track) const;
++    std::vector<std::string> Tracks() const; // tracks with at least one entry
++    void Clear(const std::string& track);
++
++  private:
++    std::map<std::string, Board> mBoards; // key: track resource name, e.g. "mk:mario_raceway"
++};
++
++// "1'23\"45" style, as the game shows times.
++std::string FormatTime(uint32_t timeCs);
++// Trims, drops control characters, limits to kMaxNameLength. Empty -> "PLAYER".
++std::string CleanName(const std::string& name);
++
++} // namespace Leaderboard
+diff --git a/src/port/leaderboard/LeaderboardGame.cpp b/src/port/leaderboard/LeaderboardGame.cpp
+new file mode 100644
+index 0000000..02bd3db
+--- /dev/null
++++ b/src/port/leaderboard/LeaderboardGame.cpp
+@@ -0,0 +1,283 @@
++#include "LeaderboardGame.h"
++#include "leaderboard_game.h"
++
++#include <cstring>
++#include <ctime>
++#include <memory>
++
++#include <libultraship/libultraship.h>
++#include "ship/Context.h"
++#include "port/Game.h"
++#include "engine/World.h"
++#include "port/netplay/Netplay.h"
++
++extern "C" {
++#include "main.h"
++#include "code_80057C60.h"
++#include "code_800029B0.h"
++#include <defines.h>
++}
++
++namespace GameUI {
++void ShowLeaderboardEntryWindow(bool show);
++}
++
++namespace Leaderboard {
++
++const char* const kCharacterNames[8] = { "Mario", "Luigi", "Yoshi", "Toad", "Donkey Kong", "Wario", "Peach", "Bowser" };
++
++namespace {
++
++std::unique_ptr<Store> sStore;
++PendingRecord sPending;
++bool sArmed = false;      // a time trial finished; waiting for the final time
++bool sWaitRelease = false; // entry closed; keep the pad from the game until released
++
++// Characters the gamepad cycles through.
++const char kPadCharset[] = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-.!";
++
++struct PadState {
++    uint16_t buttons = 0;
++    int8_t dirY = 0; // -1, 0, 1
++    int8_t dirX = 0;
++    int repeatTimer = 0;
++};
++PadState sPad;
++
++std::string FilePath() {
++    return Ship::Context::GetPathRelativeToAppDirectory("leaderboards.json");
++}
++
++std::string Today() {
++    std::time_t now = std::time(nullptr);
++    std::tm tm{};
++#ifdef _WIN32
++    localtime_s(&tm, &now);
++#else
++    localtime_r(&now, &tm);
++#endif
++    char buf[16];
++    std::strftime(buf, sizeof(buf), "%Y-%m-%d", &tm);
++    return buf;
++}
++
++int CharsetIndex(char c) {
++    const char* p = std::strchr(kPadCharset, c >= 'a' && c <= 'z' ? c - 32 : c);
++    return (p != nullptr && c != '\0') ? (int) (p - kPadCharset) : 0;
++}
++
++void SetNameChar(int pos, char c) {
++    size_t len = std::strlen(sPending.name);
++    while ((int) len < pos) { // pad with spaces up to the cursor
++        sPending.name[len++] = ' ';
++    }
++    sPending.name[pos] = c;
++    if ((size_t) pos >= len) {
++        sPending.name[pos + 1] = '\0';
++    }
++    // Drop trailing spaces so the name stays tidy.
++    len = std::strlen(sPending.name);
++    while (len > 0 && sPending.name[len - 1] == ' ' && (int) len - 1 != pos) {
++        sPending.name[--len] = '\0';
++    }
++}
++
++void StartEntry(const std::string& track, const Entry& entry, size_t rank) {
++    sPending = PendingRecord{};
++    sPending.active = true;
++    sPending.track = track;
++    sPending.trackName = TrackDisplayName(track);
++    sPending.entry = entry;
++    sPending.rank = rank;
++    std::string last = CVarGetString("gLeaderboard.LastName", "");
++    std::strncpy(sPending.name, last.c_str(), kMaxNameLength);
++    sPending.name[kMaxNameLength] = '\0';
++    sPending.cursor = 0;
++    sPad = PadState{};
++    GameUI::ShowLeaderboardEntryWindow(true);
++}
++
++void CloseEntry() {
++    sPending.active = false;
++    sWaitRelease = true;
++    GameUI::ShowLeaderboardEntryWindow(false);
++}
++
++} // namespace
++
++Store& GetStore() {
++    if (!sStore) {
++        sStore = std::make_unique<Store>();
++        sStore->Load(FilePath());
++    }
++    return *sStore;
++}
++
++void SaveStore() {
++    if (!GetStore().Save(FilePath())) {
++        SPDLOG_ERROR("[Leaderboard] Could not write {}", FilePath());
++    }
++}
++
++std::string TrackDisplayName(const std::string& track) {
++    const TrackInfo* info = gTrackRegistry.GetInfo(track);
++    if (info != nullptr && !info->Name.empty()) {
++        return info->Name;
++    }
++    const Board* board = GetStore().Get(track);
++    return (board != nullptr && !board->trackName.empty()) ? board->trackName : track;
++}
++
++std::string CurrentTrack() {
++    Track* track = GetWorld() ? GetWorld()->GetTrack() : nullptr;
++    return track != nullptr ? track->ResourceName : std::string();
++}
++
++PendingRecord& Pending() {
++    return sPending;
++}
++
++void SubmitPending() {
++    if (!sPending.active) {
++        return;
++    }
++    Entry entry = sPending.entry;
++    entry.name = CleanName(sPending.name);
++    sPending.rank = GetStore().Insert(sPending.track, sPending.trackName, entry);
++    SaveStore();
++    CVarSetString("gLeaderboard.LastName", entry.name.c_str());
++    CVarSave();
++    CloseEntry();
++}
++
++void SkipPending() {
++    if (sPending.active) {
++        CloseEntry();
++    }
++}
++
++} // namespace Leaderboard
++
++using namespace Leaderboard;
++
++extern "C" void leaderboard_on_time_trial_finished(void) {
++    if (Netplay_IsInGame()) {
++        return; // name entry would hold up the other PCs
++    }
++    sArmed = true;
++}
++
++extern "C" void leaderboard_tick(void) {
++    if (gGamestate != RACING || gModeSelection != TIME_TRIALS) {
++        sArmed = false;
++        if (sPending.active) {
++            SkipPending(); // left the race (e.g. reset) with the entry open
++        }
++        return;
++    }
++    if (!sArmed) {
++        return;
++    }
++    // The finish time and lap splits are filled in once the HUD sees the last lap.
++    const hud_player& hud = playerHUD[PLAYER_ONE];
++    if (!hud.raceCompleteBool || hud.someTimer == 0) {
++        return;
++    }
++    sArmed = false;
++    if (CVarGetInteger("gLeaderboard.Disabled", 0)) {
++        return;
++    }
++    std::string track = CurrentTrack();
++    if (track.empty()) {
++        return;
++    }
++    Entry entry;
++    entry.timeCs = hud.someTimer;
++    for (int i = 0; i < 3; i++) {
++        entry.lapsCs[i] = hud.lapDurations[i];
++    }
++    entry.character = gPlayers[0].characterId & 7;
++    entry.date = Today();
++    size_t rank = GetStore().RankFor(track, entry.timeCs);
++    if (rank > 0) {
++        StartEntry(track, entry, rank);
++    }
++}
++
++extern "C" void leaderboard_filter_pads(OSContPad* pads) {
++    if (!sPending.active && !sWaitRelease) {
++        return;
++    }
++    const OSContPad pad = pads[0];
++    for (int i = 0; i < MAXCONTROLLERS; i++) {
++        pads[i].button = 0;
++        pads[i].stick_x = pads[i].stick_y = 0;
++        pads[i].right_stick_x = pads[i].right_stick_y = 0;
++    }
++
++    uint16_t held = (uint16_t) pad.button;
++    int8_t dirY = (held & U_JPAD) || pad.stick_y > 50 ? 1 : ((held & D_JPAD) || pad.stick_y < -50 ? -1 : 0);
++    int8_t dirX = (held & R_JPAD) || pad.stick_x > 50 ? 1 : ((held & L_JPAD) || pad.stick_x < -50 ? -1 : 0);
++
++    if (sWaitRelease) {
++        // Don't let the button that closed the entry reach the results menu.
++        if (held == 0 && dirX == 0 && dirY == 0) {
++            sWaitRelease = false;
++        }
++        sPad.buttons = held;
++        return;
++    }
++
++    uint16_t pressed = held & ~sPad.buttons;
++    bool newDir = dirY != sPad.dirY || dirX != sPad.dirX;
++    if (newDir) {
++        sPad.repeatTimer = 18; // first repeat after ~0.3 s
++    } else if ((dirX != 0 || dirY != 0) && --sPad.repeatTimer <= 0) {
++        sPad.repeatTimer = 4;
++        newDir = true;
++    }
++    sPad.buttons = held;
++    sPad.dirX = dirX;
++    sPad.dirY = dirY;
++
++    PendingRecord& p = sPending;
++    const int maxPos = (int) kMaxNameLength - 1;
++    bool edited = false;
++
++    if (newDir && dirY != 0) {
++        int len = (int) std::strlen(p.name);
++        char cur = p.cursor < len ? p.name[p.cursor] : ' ';
++        int n = (int) sizeof(kPadCharset) - 1;
++        int idx = (CharsetIndex(cur) + (dirY > 0 ? 1 : n - 1)) % n;
++        SetNameChar(p.cursor, kPadCharset[idx]);
++        edited = true;
++    }
++    if ((newDir && dirX > 0) || (pressed & A_BUTTON)) {
++        if ((pressed & A_BUTTON) && p.cursor >= maxPos) {
++            SubmitPending();
++            return;
++        }
++        if (p.cursor < maxPos) {
++            if (p.cursor >= (int) std::strlen(p.name)) {
++                SetNameChar(p.cursor, ' ');
++            }
++            p.cursor++;
++        }
++        edited = true;
++    }
++    if ((newDir && dirX < 0) || (pressed & B_BUTTON)) {
++        if (p.cursor > 0) {
++            p.cursor--;
++        }
++        edited = true;
++    }
++    if (pressed & START_BUTTON) {
++        SubmitPending();
++        return;
++    }
++    if (pressed & Z_TRIG) {
++        SkipPending();
++        return;
++    }
++    p.padEdited = p.padEdited || edited;
++}
+diff --git a/src/port/leaderboard/LeaderboardGame.h b/src/port/leaderboard/LeaderboardGame.h
+new file mode 100644
+index 0000000..5fd3102
+--- /dev/null
++++ b/src/port/leaderboard/LeaderboardGame.h
+@@ -0,0 +1,40 @@
++#pragma once
++
++// C++ side of the time-trial leaderboards, shared with the UI.
++
++#include <string>
++
++#include "Leaderboard.h"
++
++namespace Leaderboard {
++
++// The leaderboards on disk (loaded on first use).
++Store& GetStore();
++// Writes the store to disk; logs on failure.
++void SaveStore();
++// Display name for a track resource name, from the installed tracks.
++std::string TrackDisplayName(const std::string& track);
++// Resource name of the track being raced, or "" outside a race.
++std::string CurrentTrack();
++
++extern const char* const kCharacterNames[8];
++
++// A record waiting for its name.
++struct PendingRecord {
++    bool active = false;
++    std::string track;
++    std::string trackName;
++    Entry entry;
++    size_t rank = 0;
++    char name[kMaxNameLength + 1] = {};
++    int cursor = 0;          // arcade-style cursor (gamepad entry)
++    bool padEdited = false;  // the gamepad changed the name this frame
++};
++
++PendingRecord& Pending();
++// Saves the pending record under its current name and closes the entry.
++void SubmitPending();
++// Closes the entry without saving.
++void SkipPending();
++
++} // namespace Leaderboard
+diff --git a/src/port/leaderboard/leaderboard_game.h b/src/port/leaderboard/leaderboard_game.h
+new file mode 100644
+index 0000000..b638d49
+--- /dev/null
++++ b/src/port/leaderboard/leaderboard_game.h
+@@ -0,0 +1,25 @@
++#ifndef SPAGHETTI_LEADERBOARD_GAME_H
++#define SPAGHETTI_LEADERBOARD_GAME_H
++
++// Hooks between the race code and the local time-trial leaderboards.
++
++#include <libultraship.h>
++#include <stdbool.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++// race_logic.c: a time trial (not a replay) has just been completed.
++void leaderboard_on_time_trial_finished(void);
++// Once per frame: opens name entry once the final time is known.
++void leaderboard_tick(void);
++// After the controllers are read: while the name entry is open, player 1's
++// controller types the name instead of driving the game.
++void leaderboard_filter_pads(OSContPad* pads);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+diff --git a/src/port/ui/ImguiUI.cpp b/src/port/ui/ImguiUI.cpp
+index 09c3ba4..d17eabe 100644
+--- a/src/port/ui/ImguiUI.cpp
++++ b/src/port/ui/ImguiUI.cpp
+@@ -4,6 +4,7 @@
+ #include "FreecamWindow.h"
+ #include "NetplayWindow.h"
+ #include "LocalPlayWindow.h"
++#include "LeaderboardWindow.h"
+ #include "Tools.h"
+ #include "SceneExplorer.h"
+ #include "Properties.h"
+@@ -43,6 +44,8 @@ std::shared_ptr<Ship::GuiWindow> mTrackPropertiesWindow;
+ std::shared_ptr<Ship::GuiWindow> mContentBrowserWindow;
+ std::shared_ptr<Ship::GuiWindow> mNetplayWindow;
+ std::shared_ptr<Ship::GuiWindow> mLocalPlayWindow;
++std::shared_ptr<Ship::GuiWindow> mLeaderboardWindow;
++std::shared_ptr<Ship::GuiWindow> mLeaderboardEntryWindow;
+ 
+ void SetupGuiElements() {
+     auto gui = Ship::Context::GetRawInstance()->GetWindow()->GetGui();
+@@ -97,6 +100,15 @@ void SetupGuiElements() {
+     mLocalPlayWindow =
+         std::make_shared<LocalPlayWindow>("gLocalPlay.WindowOpen", "Local Multiplayer", ImVec2(480, 640));
+     gui->AddGuiWindow(mLocalPlayWindow);
++
++    mLeaderboardWindow = std::make_shared<LeaderboardWindow>("gLeaderboard.WindowOpen", "Leaderboards", ImVec2(560, 420));
++    gui->AddGuiWindow(mLeaderboardWindow);
++    // Opened by the game after a top-10 Time Trial; starts hidden every launch.
++    CVarSetInteger("gLeaderboard.EntryOpen", 0);
++    mLeaderboardEntryWindow = std::make_shared<LeaderboardEntryWindow>(
++        "gLeaderboard.EntryOpen", "Time Trial Record", ImVec2(-1, -1),
++        ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings);
++    gui->AddGuiWindow(mLeaderboardEntryWindow);
+ }
+ 
+ void Destroy() {
+@@ -110,6 +122,8 @@ void Destroy() {
+     mContentBrowserWindow = nullptr;
+     mNetplayWindow = nullptr;
+     mLocalPlayWindow = nullptr;
++    mLeaderboardWindow = nullptr;
++    mLeaderboardEntryWindow = nullptr;
+ }
+ 
+ std::string GetWindowButtonText(const char* text, bool menuOpen) {
+diff --git a/src/port/ui/LeaderboardWindow.cpp b/src/port/ui/LeaderboardWindow.cpp
+new file mode 100644
+index 0000000..68cc1b2
+--- /dev/null
++++ b/src/port/ui/LeaderboardWindow.cpp
+@@ -0,0 +1,274 @@
++#include "LeaderboardWindow.h"
++
++#include <imgui.h>
++#include <imgui_internal.h>
++#include <algorithm>
++#include <cstring>
++#include <memory>
++#include <string>
++#include <vector>
++
++#include "port/Game.h"
++#include "ship/Context.h"
++#include "ship/window/gui/Gui.h"
++#include "port/leaderboard/LeaderboardGame.h"
++
++namespace GameUI {
++
++namespace {
++
++std::shared_ptr<Ship::GuiWindow> sEntryWindow;
++const char* const kEntryWindowName = "Time Trial Record";
++const ImVec4 kGold(1.0f, 0.84f, 0.2f, 1.0f);
++const ImVec4 kGreen(0.45f, 0.9f, 0.45f, 1.0f);
++const ImVec4 kGrey(0.65f, 0.65f, 0.65f, 1.0f);
++
++std::string Ordinal(size_t n) {
++    const char* suffix = "th";
++    if (n % 100 < 11 || n % 100 > 13) {
++        suffix = n % 10 == 1 ? "st" : n % 10 == 2 ? "nd" : n % 10 == 3 ? "rd" : "th";
++    }
++    return std::to_string(n) + suffix;
++}
++
++uint32_t BestLap(const Leaderboard::Entry& e) {
++    uint32_t best = 0;
++    for (uint32_t lap : e.lapsCs) {
++        if (lap > 0 && (best == 0 || lap < best)) {
++            best = lap;
++        }
++    }
++    return best;
++}
++
++// Draws a board. `highlight` (1-based, 0 = none) marks a row; `preview` is
++// shown in that slot as a not-yet-saved entry.
++void DrawBoardTable(const Leaderboard::Board* board, size_t highlight, const Leaderboard::Entry* preview,
++                    bool compact) {
++    std::vector<Leaderboard::Entry> rows;
++    if (board != nullptr) {
++        rows = board->entries;
++    }
++    if (preview != nullptr && highlight > 0 && highlight <= rows.size() + 1) {
++        rows.insert(rows.begin() + (highlight - 1), *preview);
++        if (rows.size() > Leaderboard::kMaxEntries) {
++            rows.resize(Leaderboard::kMaxEntries);
++        }
++    }
++    if (rows.empty()) {
++        ImGui::TextColored(kGrey, "No times yet. Finish a Time Trial on this track to set one.");
++        return;
++    }
++    int columns = compact ? 3 : 6;
++    ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingFixedFit;
++    if (!ImGui::BeginTable("##board", columns, flags)) {
++        return;
++    }
++    ImGui::TableSetupColumn("#");
++    ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
++    ImGui::TableSetupColumn("Time");
++    if (!compact) {
++        ImGui::TableSetupColumn("Best lap");
++        ImGui::TableSetupColumn("Driver");
++        ImGui::TableSetupColumn("Date");
++    }
++    ImGui::TableHeadersRow();
++    for (size_t i = 0; i < rows.size(); i++) {
++        const auto& e = rows[i];
++        bool mark = highlight == i + 1;
++        ImGui::TableNextRow();
++        if (mark) {
++            ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, IM_COL32(60, 90, 40, 255));
++        }
++        ImGui::TableNextColumn();
++        if (i == 0) {
++            ImGui::TextColored(kGold, "1");
++        } else {
++            ImGui::Text("%zu", i + 1);
++        }
++        ImGui::TableNextColumn();
++        ImGui::TextUnformatted(mark && preview ? "(you)" : e.name.c_str());
++        ImGui::TableNextColumn();
++        ImGui::TextUnformatted(Leaderboard::FormatTime(e.timeCs).c_str());
++        if (!compact) {
++            ImGui::TableNextColumn();
++            uint32_t lap = BestLap(e);
++            ImGui::TextUnformatted(lap ? Leaderboard::FormatTime(lap).c_str() : "-");
++            ImGui::TableNextColumn();
++            ImGui::TextUnformatted(Leaderboard::kCharacterNames[e.character & 7]);
++            ImGui::TableNextColumn();
++            ImGui::TextUnformatted(e.date.c_str());
++        }
++    }
++    ImGui::EndTable();
++}
++
++// The name as arcade-style letter boxes with the gamepad cursor.
++void DrawNameBoxes(const Leaderboard::PendingRecord& p) {
++    const float box = ImGui::GetFontSize() * 1.6f;
++    const float gap = 3.0f;
++    ImVec2 origin = ImGui::GetCursorScreenPos();
++    ImDrawList* dl = ImGui::GetWindowDrawList();
++    size_t len = std::strlen(p.name);
++    for (int i = 0; i < (int) Leaderboard::kMaxNameLength; i++) {
++        ImVec2 a(origin.x + i * (box + gap), origin.y);
++        ImVec2 b(a.x + box, a.y + box);
++        bool cursor = i == p.cursor;
++        dl->AddRectFilled(a, b, cursor ? IM_COL32(70, 100, 160, 255) : IM_COL32(40, 40, 40, 255), 3.0f);
++        dl->AddRect(a, b, cursor ? IM_COL32(255, 220, 80, 255) : IM_COL32(110, 110, 110, 255), 3.0f, 0,
++                    cursor ? 2.0f : 1.0f);
++        if ((size_t) i < len && p.name[i] != ' ') {
++            char c[2] = { p.name[i], 0 };
++            ImVec2 ts = ImGui::CalcTextSize(c);
++            dl->AddText(ImVec2(a.x + (box - ts.x) / 2, a.y + (box - ts.y) / 2), IM_COL32(255, 255, 255, 255), c);
++        }
++    }
++    ImGui::Dummy(ImVec2(Leaderboard::kMaxNameLength * (box + gap), box));
++}
++
++} // namespace
++
++void ShowLeaderboardEntryWindow(bool show) {
++    if (!sEntryWindow) {
++        sEntryWindow = Ship::Context::GetRawInstance()->GetWindow()->GetGui()->GetGuiWindow(kEntryWindowName);
++    }
++    if (sEntryWindow) {
++        if (show) {
++            sEntryWindow->Show();
++        } else {
++            sEntryWindow->Hide();
++        }
++    }
++}
++
++// ------------------------------------------------------------ name entry
++
++void LeaderboardEntryWindow::UpdateElement() {
++    // Closed with the window's X: treat as Skip.
++    if (!IsVisible() && Leaderboard::Pending().active) {
++        Leaderboard::SkipPending();
++    }
++}
++
++void LeaderboardEntryWindow::DrawElement() {
++    Leaderboard::PendingRecord& p = Leaderboard::Pending();
++    if (!p.active) {
++        ImGui::TextColored(kGrey, "No record to save.");
++        if (ImGui::Button("Close")) {
++            SetVisibility(false);
++        }
++        return;
++    }
++    if (ImGui::IsWindowAppearing()) {
++        ImVec2 size = ImGui::GetWindowSize();
++        ImVec2 center = ImGui::GetMainViewport()->GetCenter();
++        ImGui::SetWindowPos(ImVec2(center.x - size.x / 2, center.y - size.y / 2));
++    }
++
++    ImGui::TextColored(kGold, "NEW RECORD - %s place!", Ordinal(p.rank).c_str());
++    ImGui::Text("%s   %s", p.trackName.c_str(), Leaderboard::FormatTime(p.entry.timeCs).c_str());
++    ImGui::TextColored(kGrey, "Laps: %s  %s  %s", Leaderboard::FormatTime(p.entry.lapsCs[0]).c_str(),
++                       Leaderboard::FormatTime(p.entry.lapsCs[1]).c_str(),
++                       Leaderboard::FormatTime(p.entry.lapsCs[2]).c_str());
++    ImGui::Spacing();
++    ImGui::SeparatorText("Enter your name");
++
++    // The gamepad edited the name: let go of the text box so it shows the change.
++    if (p.padEdited) {
++        p.padEdited = false;
++        if (ImGui::GetActiveID() != 0) {
++            ImGui::ClearActiveID();
++        }
++    }
++    DrawNameBoxes(p);
++    ImGui::Spacing();
++
++    if (ImGui::IsWindowAppearing()) {
++        ImGui::SetKeyboardFocusHere();
++    }
++    ImGui::SetNextItemWidth(220.0f);
++    bool enter = ImGui::InputText("##name", p.name, sizeof(p.name), ImGuiInputTextFlags_EnterReturnsTrue);
++    ImGui::SameLine();
++    if (ImGui::Button("Save") || enter) {
++        Leaderboard::SubmitPending();
++        return;
++    }
++    ImGui::SameLine();
++    if (ImGui::Button("Skip")) {
++        Leaderboard::SkipPending();
++        return;
++    }
++    // Keep the arcade cursor inside the name typed with the keyboard.
++    p.cursor = std::min<int>(p.cursor, (int) Leaderboard::kMaxNameLength - 1);
++
++    ImGui::TextColored(kGrey, "Keyboard: type, then Enter.");
++    ImGui::TextColored(kGrey, "Gamepad: Up/Down letter, Left/Right or A/B move, Start save, Z skip.");
++    ImGui::Spacing();
++    DrawBoardTable(Leaderboard::GetStore().Get(p.track), p.rank, &p.entry, true);
++}
++
++// ------------------------------------------------------------ browse
++
++void LeaderboardWindow::DrawElement() {
++    static std::string sSelected;
++    Leaderboard::Store& store = Leaderboard::GetStore();
++
++    // Every installed track, plus any track that has times but isn't installed now.
++    std::vector<std::pair<std::string, std::string>> tracks; // resource, display
++    for (const TrackInfo* info : gTrackRegistry.GetAllInfo()) {
++        tracks.emplace_back(info->ResourceName, info->Name.empty() ? info->ResourceName : info->Name);
++    }
++    for (const std::string& t : store.Tracks()) {
++        bool known = std::any_of(tracks.begin(), tracks.end(), [&](const auto& x) { return x.first == t; });
++        if (!known) {
++            tracks.emplace_back(t, Leaderboard::TrackDisplayName(t) + " (not installed)");
++        }
++    }
++    if (sSelected.empty()) {
++        std::string current = Leaderboard::CurrentTrack();
++        sSelected = !current.empty() ? current : (tracks.empty() ? std::string() : tracks[0].first);
++    }
++
++    std::string preview = Leaderboard::TrackDisplayName(sSelected);
++    if (ImGui::BeginCombo("Track", preview.c_str())) {
++        for (const auto& [res, name] : tracks) {
++            const Leaderboard::Board* b = store.Get(res);
++            std::string label = name + (b ? "  (" + std::to_string(b->entries.size()) + ")" : "");
++            if (ImGui::Selectable(label.c_str(), res == sSelected)) {
++                sSelected = res;
++            }
++        }
++        ImGui::EndCombo();
++    }
++    ImGui::Spacing();
++    DrawBoardTable(store.Get(sSelected), 0, nullptr, false);
++    ImGui::Spacing();
++
++    if (store.Get(sSelected) != nullptr) {
++        if (ImGui::Button("Clear this track's times")) {
++            ImGui::OpenPopup("Clear times?");
++        }
++        if (ImGui::BeginPopupModal("Clear times?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
++            ImGui::Text("Delete every time on %s?", preview.c_str());
++            if (ImGui::Button("Delete")) {
++                store.Clear(sSelected);
++                Leaderboard::SaveStore();
++                ImGui::CloseCurrentPopup();
++            }
++            ImGui::SameLine();
++            if (ImGui::Button("Cancel")) {
++                ImGui::CloseCurrentPopup();
++            }
++            ImGui::EndPopup();
++        }
++    }
++    ImGui::Separator();
++    bool enabled = !CVarGetInteger("gLeaderboard.Disabled", 0);
++    if (ImGui::Checkbox("Ask for my name after a top-10 Time Trial", &enabled)) {
++        CVarSetInteger("gLeaderboard.Disabled", enabled ? 0 : 1);
++        CVarSave();
++    }
++    ImGui::TextColored(kGrey, "Times are saved on this PC in leaderboards.json, next to the game.");
++}
++
++} // namespace GameUI
+diff --git a/src/port/ui/LeaderboardWindow.h b/src/port/ui/LeaderboardWindow.h
+new file mode 100644
+index 0000000..a3d77cd
+--- /dev/null
++++ b/src/port/ui/LeaderboardWindow.h
+@@ -0,0 +1,34 @@
++#pragma once
++
++#include <libultraship/libultraship.h>
++
++namespace GameUI {
++
++// Browse the local time-trial leaderboards, one track at a time.
++class LeaderboardWindow : public Ship::GuiWindow {
++  public:
++    using Ship::GuiWindow::GuiWindow;
++
++  protected:
++    void InitElement() override {
++    }
++    void DrawElement() override;
++    void UpdateElement() override {
++    }
++};
++
++// Shown after a time trial that makes the top 10: enter your name.
++class LeaderboardEntryWindow : public Ship::GuiWindow {
++  public:
++    using Ship::GuiWindow::GuiWindow;
++
++  protected:
++    void InitElement() override {
++    }
++    void DrawElement() override;
++    void UpdateElement() override;
++};
++
++void ShowLeaderboardEntryWindow(bool show);
++
++} // namespace GameUI
+diff --git a/src/port/ui/PortMenu.cpp b/src/port/ui/PortMenu.cpp
+index a792c50..4f9b2bb 100644
+--- a/src/port/ui/PortMenu.cpp
++++ b/src/port/ui/PortMenu.cpp
+@@ -399,6 +399,13 @@ void PortMenu::AddEnhancements() {
+         .WindowName("Netplay")
+         .Options(ButtonOptions().Tooltip("Host or join a LAN match with other SpaghettiKart players."));
+ 
++    path = { "Enhancements", "Leaderboards", SECTION_COLUMN_1 };
++    AddSidebarEntry("Enhancements", "Leaderboards", 1);
++    AddWidget(path, "Open Leaderboards", WIDGET_WINDOW_BUTTON)
++        .CVar("gLeaderboard.WindowOpen")
++        .WindowName("Leaderboards")
++        .Options(ButtonOptions().Tooltip("Best Time Trial times for each track, saved on this PC."));
++
+     path = { "Enhancements", "Cheats", SECTION_COLUMN_1 };
+     AddSidebarEntry("Enhancements", "Cheats", 3);
+     AddWidget(path, "Moon Jump", WIDGET_CVAR_CHECKBOX).CVar("gEnableMoonJump");
+diff --git a/src/racing/race_logic.c b/src/racing/race_logic.c
+index 5de0f06..2293fc9 100644
+--- a/src/racing/race_logic.c
++++ b/src/racing/race_logic.c
+@@ -1,5 +1,6 @@
+ #include <libultraship.h>
+ #include "port/netplay/netrace.h"
++#include "port/leaderboard/leaderboard_game.h"
+ #include <stdio.h>
+ #include <macros.h>
+ #include <mk64.h>
+@@ -1005,6 +1006,9 @@ void func_8028FCBC(void) {
+                     break;
+                 case TIME_TRIALS:
+                     D_802BA038 = 360;
++                    if (D_8015F890 == 0) {
++                        leaderboard_on_time_trial_finished(); // offer a leaderboard spot
++                    }
+                     if (D_8015F890 != 0) {
+                         gRaceState = RACE_EXIT;
+                     } else {
+-- 
+2.43.0
+

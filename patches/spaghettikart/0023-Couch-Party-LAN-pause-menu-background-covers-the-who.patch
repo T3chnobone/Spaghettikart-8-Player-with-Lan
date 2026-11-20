@@ -1,0 +1,47 @@
+From 5590ef81ec9c75c67560db7ca0b93db213fe0a00 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 20 Nov 2026 10:24:56 +0000
+Subject: [PATCH] Couch Party / LAN: pause menu background covers the whole
+ window width
+
+VS and Battle pause menus in a one-view (1P screen mode) race drew their
+dark background as a 4:3 box, leaving the sides of a widescreen window
+uncovered. Couch Party and LAN GAME races run in that mode, so use the
+widescreen box there, as the Grand Prix and Time Trial pauses already do.
+---
+ src/menu_items.c | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/src/menu_items.c b/src/menu_items.c
+index dcd0635e0..6267bb82e 100644
+--- a/src/menu_items.c
++++ b/src/menu_items.c
+@@ -8418,6 +8418,12 @@ void render_pause_menu_versus(MenuItem* arg0) {
+                                                    temp_v1 + rightEdge, temp_t0 + temp_t4, 0, 0, 0, 140);
+             }
+             break;
++        case SCREEN_MODE_1P:
++            // One full-screen view (also Couch Party / LAN GAME): darken the
++            // whole width of a widescreen window, as the Grand Prix pause does.
++            gDisplayListHead = draw_box_wide(gDisplayListHead, temp_v1 - temp_t3, temp_t0 - temp_t4,
++                                             temp_v1 + temp_t3, temp_t0 + temp_t4, 0, 0, 0, 140);
++            break;
+         default:
+             gDisplayListHead = draw_box(gDisplayListHead, temp_v1 - temp_t3, temp_t0 - temp_t4, temp_v1 + temp_t3,
+                                         temp_t0 + temp_t4, 0, 0, 0, 140);
+@@ -8535,6 +8541,12 @@ void render_pause_battle(MenuItem* arg0) {
+                                                    temp_v1 + rightEdge, temp_t0 + temp_t4, 0, 0, 0, 140);
+             }
+             break;
++        case SCREEN_MODE_1P:
++            // One full-screen view (also Couch Party / LAN GAME): darken the
++            // whole width of a widescreen window, as the Grand Prix pause does.
++            gDisplayListHead = draw_box_wide(gDisplayListHead, temp_v1 - temp_t3, temp_t0 - temp_t4,
++                                             temp_v1 + temp_t3, temp_t0 + temp_t4, 0, 0, 0, 140);
++            break;
+         default:
+             gDisplayListHead = draw_box(gDisplayListHead, temp_v1 - temp_t3, temp_t0 - temp_t4, temp_v1 + temp_t3,
+                                         temp_t0 + temp_t4, 0, 0, 0, 140);
+-- 
+2.43.0
+
