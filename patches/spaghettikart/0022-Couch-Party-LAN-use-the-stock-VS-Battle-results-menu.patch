@@ -1,0 +1,372 @@
+From 2f5c64772434907e11c838af021bcfb120631a18 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 20 Nov 2026 10:16:27 +0000
+Subject: [PATCH] Couch Party / LAN: use the stock VS / Battle results menu
+ after a race
+
+After a Couch Party or LAN GAME race the results were an overlay panel.
+They are now the game's own VS / Battle results menu, the same one a
+2-4 player VS race shows: the fade to black, the VS or BATTLE title, the
+character portraits with win counts and the winner's celebration, and
+Retry / Course change / Driver change / Quit with the stock cursor,
+sounds and fade.
+
+- 2-4 players: the stock portraits, with the couch party's own wins and
+  1st/2nd/3rd counts for this session.
+- 5-8 players: the four portraits don't fit, so the same menu lists every
+  player's place, number, driver and wins in the game's font.
+- Players 5-8 can work the menu too (they're added to the combined
+  controller while the results are up).
+- The menu's own fade-in and portrait slide take about 1.5 seconds before
+  it reads input, and it only reacts to new presses, so buttons from the
+  end of the race still can't pick an option.
+- The menu runs and is drawn once over the whole window, not inside each
+  player's view.
+- The winner's view isn't zoomed to full screen first: every player keeps
+  their own view behind the menu.
+---
+ src/main.c                    | 13 +++++++
+ src/menu_items.c              | 72 ++++++++++++++++++++++++++++++++---
+ src/port/couch/CouchParty.cpp | 65 +++++++++++++++++++++++++++++--
+ src/port/couch/couch.h        | 11 +++++-
+ src/racing/race_logic.c       |  7 +++-
+ 5 files changed, 157 insertions(+), 11 deletions(-)
+
+diff --git a/src/main.c b/src/main.c
+index cd0636cf8..827aeb002 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -431,6 +431,19 @@ void read_controllers(void) {
+     gControllerFive->stickDepressed =
+         (s16) (((gControllerOne->stickDepressed | gControllerTwo->stickDepressed) | gControllerThree->stickDepressed) |
+                gControllerFour->stickDepressed);
++    // Couch Party / LAN GAME results: players 5-8 can work the menu too.
++    if (couch_results_ready()) {
++        s32 i;
++        for (i = 4; i < couch_player_count() && i < NETRACE_MAX_HUMANS; i++) {
++            struct Controller* extra = get_player_controller(i);
++            gControllerFive->button |= extra->button;
++            gControllerFive->buttonPressed |= extra->buttonPressed;
++            gControllerFive->buttonDepressed |= extra->buttonDepressed;
++            gControllerFive->stickDirection |= extra->stickDirection;
++            gControllerFive->stickPressed |= extra->stickPressed;
++            gControllerFive->stickDepressed |= extra->stickDepressed;
++        }
++    }
+ }
+ 
+ void func_80000BEC(void) {
+diff --git a/src/menu_items.c b/src/menu_items.c
+index 52f95aed6..dcd0635e0 100644
+--- a/src/menu_items.c
++++ b/src/menu_items.c
+@@ -1,8 +1,10 @@
+ #include "port/couch/couch.h"
++#include "port/localplay/localplay.h"
+ #include "port/leaderboard/leaderboard_game.h"
+ #include "port/couch/lan_setup.h"
+ #include "port/textures/custom_textures.h"
+ #include <libultraship.h>
++#include <stdio.h>
+ #include "port/netplay/netrace.h"
+ #include <libultra/types.h>
+ #include <macros.h>
+@@ -2329,10 +2331,19 @@ void func_80093A30(s32 arg0) {
+     func_8009E2A8(D_800F0B1C[arg0]);
+ }
+ 
++// Couch Party / LAN GAME results: the menus are drawn (and run) once over the
++// whole window, not inside each player's view (see func_80093C98).
++static bool menus_over_whole_window(void) {
++    return couch_results_ready() && localplay_views_active();
++}
++
+ void func_80093A5C(u32 arg0) {
+     if (gNumScreens == 0) {
+         func_8009C918();
+     }
++    if (menus_over_whole_window()) {
++        return;
++    }
+     switch (arg0) {
+         case RENDER_SCREEN_MODE_1P_PLAYER_ONE:
+             func_800940EC((s32) D_800F0B1C[arg0]);
+@@ -2412,6 +2423,9 @@ void func_80093C98(s32 arg0) {
+     AddEffectMatrixOrtho();
+     gSPDisplayList(gDisplayListHead++, D_02007F18);
+     gDPSetScissor(gDisplayListHead++, G_SC_NON_INTERLACE, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
++    if ((arg0 == 0) && menus_over_whole_window()) {
++        func_800940EC(0); // the results menu, once, over every view
++    }
+     handle_menus_special();
+     if (arg0 == 0) {
+         func_800A54EC();
+@@ -8793,6 +8807,43 @@ void func_800A6154(MenuItem* arg0) {
+     }
+ }
+ 
++// Players on the VS / Battle results: the couch party's players while its
++// results are up (races run as 1P), otherwise the stock player count.
++static s32 results_player_count(void) {
++    return couch_results_player_count(gPlayerCount);
++}
++
++// Couch Party with 5-8 players: the four portraits don't fit, so the results
++// list everyone's place, player number, driver and wins in the game's font.
++static void couch_results_standings(MenuItem* arg0) {
++    static const char* sPlaceNames[8] = { "1ST", "2ND", "3RD", "4TH", "5TH", "6TH", "7TH", "8TH" };
++    char text[16];
++    s32 place;
++    s32 player;
++    s32 character;
++    s32 wins;
++    bool finished;
++    s32 row;
++
++    for (place = 0; place < 8; place++) {
++        if (!couch_results_entry(place, &player, &character, &wins, &finished)) {
++            break;
++        }
++        row = arg0->row + 0x2E + (place * 0x0F);
++        if (place == 0) {
++            set_text_color((s32) gGlobalTimer % 3);
++        } else {
++            set_text_color(TEXT_BLUE);
++        }
++        print_text_mode_1(0x30, row, (char*) sPlaceNames[place], 0, 0.7f, 0.7f);
++        sprintf(text, "%dP", player + 1);
++        print_text_mode_1(0x5C, row, text, 0, 0.7f, 0.7f);
++        print_text_mode_1(0x80, row, D_800E76A8[character & 7], 0, 0.7f, 0.7f);
++        sprintf(text, "%d", wins);
++        print_text_mode_1(0xF8, row, text, 0, 0.7f, 0.7f);
++    }
++}
++
+ void func_800A638C(MenuItem* arg0) {
+     UNUSED s32 temp_a0;
+     s32 var_a1;
+@@ -8823,7 +8874,7 @@ void func_800A638C(MenuItem* arg0) {
+             break;
+     }
+     gDPSetPrimColor(gDisplayListHead++, 0, 0, 0x00, 0x00, 0x00, var_a1);
+-    switch (gPlayerCount) {
++    switch (results_player_count()) {
+         case 2:
+             func_800A69C8(arg0);
+             break;
+@@ -8834,6 +8885,9 @@ void func_800A638C(MenuItem* arg0) {
+             func_800A6CC0(arg0);
+             break;
+         default:
++            if ((results_player_count() > 4) && (arg0->state >= 2)) {
++                couch_results_standings(arg0);
++            }
+             break;
+     }
+     if (arg0->state >= 10) {
+@@ -8896,7 +8950,7 @@ void func_800A69C8(UNUSED MenuItem* arg0) {
+     char* temp_s3;
+     u8* var_s4;
+ 
+-    for (var_s0 = 0; var_s0 < gPlayerCount; var_s0++) {
++    for (var_s0 = 0; var_s0 < results_player_count(); var_s0++) {
+         var_v1 = 0;
+         thing = &D_800E7300[var_s0];
+         switch (gModeSelection) {
+@@ -8931,7 +8985,7 @@ void func_800A69C8(UNUSED MenuItem* arg0) {
+ void func_800A6BEC(UNUSED MenuItem* arg0) {
+     s32 var_s0;
+ 
+-    for (var_s0 = 0; var_s0 < gPlayerCount; var_s0++) {
++    for (var_s0 = 0; var_s0 < results_player_count(); var_s0++) {
+         switch (gModeSelection) {
+             case VERSUS:
+                 func_800A6E94(3, var_s0, gNmiUnknown2);
+@@ -8946,7 +9000,7 @@ void func_800A6BEC(UNUSED MenuItem* arg0) {
+ void func_800A6CC0(UNUSED MenuItem* arg0) {
+     s32 var_s0;
+ 
+-    for (var_s0 = 0; var_s0 < gPlayerCount; var_s0++) {
++    for (var_s0 = 0; var_s0 < results_player_count(); var_s0++) {
+         switch (gModeSelection) {
+             case VERSUS:
+                 func_800A6E94(4, var_s0, gNmiUnknown3);
+@@ -11809,7 +11863,13 @@ void func_800ACC50(MenuItem* arg0) {
+             if (arg0->param1 >= 0x65) {
+                 arg0->state = 1;
+                 arg0->param1 = 0;
+-                for (i = 0; i < gPlayerCount; i++) {
++                if (results_player_count() > 4) {
++                    // Couch Party with 5-8 players: a standings list instead
++                    // of the four character portraits.
++                    arg0->state = 2;
++                    break;
++                }
++                for (i = 0; i < results_player_count(); i++) {
+                     add_menu_item(i + MENU_ITEM_TYPE_0B1, 0, 0, (s8) (MENU_ITEM_PRIORITY_5 - i));
+                 }
+             }
+@@ -11890,7 +11950,7 @@ void func_800ACF40(MenuItem* arg0) {
+             arg0->state = 1;
+             break;
+         case 1:
+-            temp_v0_2 = &D_800E7300[((gPlayerCount - 2) * 4) + temp_a2];
++            temp_v0_2 = &D_800E7300[((results_player_count() - 2) * 4) + temp_a2];
+             func_800A9208(arg0, temp_v0_2->column);
+             func_800A9278(arg0, temp_v0_2->row);
+             if (arg0->column == temp_v0_2->column) {
+diff --git a/src/port/couch/CouchParty.cpp b/src/port/couch/CouchParty.cpp
+index 7534bc539..5ee4b503c 100644
+--- a/src/port/couch/CouchParty.cpp
++++ b/src/port/couch/CouchParty.cpp
+@@ -51,6 +51,10 @@ bool sFreshSelect = false; // the character screen was opened from the main menu
+ int sMenuPort = 0;
+ std::array<uint16_t, MAXCONTROLLERS> sMenuPrev{};
+ std::array<int, kMaxPlayers> sWins{};
++// 1st/2nd/3rd finishes this session (the stock 3P/4P VS results show these).
++std::array<std::array<int, 3>, kMaxPlayers> sPlaces{};
++// The race is over and the stock VS/Battle results menu is up.
++bool sResultsReady = false;
+ 
+ // The roster that raced last (set when the lobby starts a race).
+ bool sCommitted = false;
+@@ -292,6 +296,8 @@ void CouchOff() {
+     sOnSelect = false;
+     sResults = Results{};
+     sWins.fill(0);
++    sPlaces = {};
++    sResultsReady = false;
+     GameUI::ShowCouchResults(false);
+ }
+ 
+@@ -359,6 +365,31 @@ void RunPending() {
+     }
+ }
+ 
++// The stock VS/Battle results menu draws players 1-4 from the character
++// selections and the session counters it keeps for 2, 3 and 4 players. With
++// up to 4 couch players, give it the couch party's own numbers.
++void StockResultsData() {
++    const int n = std::min(sCount, 4);
++    if (n < 2) {
++        return;
++    }
++    auto clamp99 = [](int v) { return (u8) std::min(v, 99); };
++    for (int k = 0; k < n; k++) {
++        gCharacterSelections[k] = (s8) sCharacters[k];
++        if (gModeSelection == BATTLE) {
++            u8* wins = n == 2 ? gNmiUnknown4 : (n == 3 ? gNmiUnknown5 : gNmiUnknown6);
++            wins[k] = clamp99(sWins[k]);
++        } else if (n == 2) {
++            gNmiUnknown1[k] = clamp99(sWins[k]);
++        } else {
++            u8* places = n == 3 ? gNmiUnknown2 : gNmiUnknown3;
++            for (int i = 0; i < 3; i++) {
++                places[k * 3 + i] = clamp99(sPlaces[k][i]);
++            }
++        }
++    }
++}
++
+ } // namespace
+ 
+ Results& GetResults() {
+@@ -419,6 +450,8 @@ extern "C" void couch_lan_begin(s32 total) {
+     sCount = 0;
+     sResults = Results{};
+     sWins.fill(0);
++    sPlaces = {};
++    sResultsReady = false;
+     sFinishOrder.clear();
+     sEliminated.clear();
+     LanRoster(std::clamp<int>(total, 1, kMaxPlayers));
+@@ -552,6 +585,7 @@ extern "C" void couch_on_setup_race(void) {
+     sFinishOrder.clear();
+     sEliminated.clear();
+     sResults = Results{};
++    sResultsReady = false;
+     GameUI::ShowCouchResults(false);
+ }
+ 
+@@ -722,8 +756,33 @@ extern "C" void couch_on_race_over(void) {
+     if (!r.order.empty()) {
+         sWins[r.order[0].player]++;
+     }
+-    r.lockFrames = kResultsLockFrames;
++    for (size_t i = 0; i < r.order.size() && i < 3; i++) {
++        sPlaces[r.order[i].player][i]++;
++    }
++    // The results are the stock VS/Battle results menu (race_logic.c spawns
++    // it), so the overlay panel stays closed.
++    r.active = false;
+     sResults = r;
+-    ClearEdges();
+-    GameUI::ShowCouchResults(true);
++    sResultsReady = true;
++    StockResultsData();
++}
++
++extern "C" bool couch_results_ready(void) {
++    return sResultsReady && couch_race_active();
++}
++
++extern "C" s32 couch_results_player_count(s32 stock) {
++    return couch_results_ready() ? sCount : stock;
++}
++
++extern "C" bool couch_results_entry(s32 place, s32* player, s32* character, s32* wins, bool* finished) {
++    if (!couch_results_ready() || place < 0 || place >= (s32) sResults.order.size()) {
++        return false;
++    }
++    const Standing& st = sResults.order[place];
++    *player = st.player;
++    *character = st.character;
++    *wins = Wins(st.player);
++    *finished = st.finished;
++    return true;
+ }
+diff --git a/src/port/couch/couch.h b/src/port/couch/couch.h
+index 38c84557a..2d258636e 100644
+--- a/src/port/couch/couch.h
++++ b/src/port/couch/couch.h
+@@ -69,8 +69,17 @@ bool couch_portrait_spot(s32 playerIdx, s32* column, s32* row);
+ // is over (every player but one has finished).
+ bool couch_versus_finished(s32 playerId);
+ void couch_battle_eliminated(s32 playerId);
+-// The race-over pause has run out: show the results (instead of the stock zoom).
++// The race-over pause has run out: work out the standings (the stock VS /
++// Battle results menu then shows them).
+ void couch_on_race_over(void);
++// True from then until the next race or menu: the stock results menu is up
++// for a couch race.
++bool couch_results_ready(void);
++// Players the stock results menu shows: the couch party's count while its
++// results are up, otherwise `stock` (gPlayerCount).
++s32 couch_results_player_count(s32 stock);
++// One line of the couch standings (place 0 = 1st), for 5-8 player results.
++bool couch_results_entry(s32 place, s32* player, s32* character, s32* wins, bool* finished);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/src/racing/race_logic.c b/src/racing/race_logic.c
+index 1417635cc..050b7cb6b 100644
+--- a/src/racing/race_logic.c
++++ b/src/racing/race_logic.c
+@@ -1057,8 +1057,13 @@ void func_8028FCBC(void) {
+                     case VERSUS:
+                     case BATTLE:
+                         if (couch_race_active()) {
+-                            // Couch Party: the results screen over the live views.
++                            // Couch Party / LAN GAME: the stock VS / Battle
++                            // results menu, over everyone's views (no zoom on
++                            // the winner's screen: every player has a view).
+                             couch_on_race_over();
++                            D_800DC5B0 = 1;
++                            D_800DC5B8 = 0; // HUD off, as for the stock results
++                            func_80092604();
+                             gRaceState = RACE_EXIT;
+                             break;
+                         }
+-- 
+2.43.0
+
