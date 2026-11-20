@@ -11,13 +11,13 @@ An unofficial build of [SpaghettiKart](https://github.com/HarbourMasters/Spaghet
 
 ## Download
 
-**Download the installer:** [latest release](../../releases/latest) · **HD textures:** [MK64 Reloaded (sk files)](https://github.com/GhostlyDark/MK64-Reloaded/releases/tag/v2026.04.03), see [HD textures](#hd-textures-optional) below.
+**[⬇ Download SpaghettiKart-LAN8-Setup.exe](https://github.com/T3chnobone/Spaghettikart-8-Player-with-Lan/raw/latest-build/SpaghettiKart-LAN8-Setup.exe)** · **HD textures:** [MK64 Reloaded (sk files)](https://github.com/GhostlyDark/MK64-Reloaded/releases/tag/v2026.04.03), see [HD textures](#hd-textures-optional) below.
 
-Get **`SpaghettiKart-LAN8-Setup-<version>.exe`** from the [latest release](../../releases/latest) and run it.
+The setup is small: when it runs it **downloads the newest build from this repo**, so the same setup always installs the latest version. To update later, run it again or use **Start menu > SpaghettiKart LAN8 > Check for updates**. You need an internet connection while it installs.
 
 - Installs for your Windows account only (no admin prompt), by default to `%LOCALAPPDATA%\SpaghettiKart-LAN8`.
 - Adds Start menu and desktop shortcuts and an uninstaller (Settings > Apps).
-- Upgrading keeps your settings, leaderboards and any menu pictures you replaced.
+- Updating keeps your settings, leaderboards, mods and any menu pictures you replaced.
 
 Windows may warn that the app is from an unknown publisher because the build isn't signed: choose **More info > Run anyway**.
 
@@ -74,13 +74,32 @@ Finish a Time Trial with a top-10 time and the game asks for your name (up to 7 
 
 More detail is in the [docs](docs/) folder (also installed with the game).
 
-## Building the installer
+## Publishing an update
 
-The installer is made with NSIS from a Windows build folder:
+The setup always installs whatever is on the [`latest-build`](../../tree/latest-build) branch, so **the setup itself never needs rebuilding**. To publish a new build:
+
+1. Zip the Windows build folder (the folder with `Spaghettify.exe`, the DLLs, `spaghetti.o2r`, `yamls`, `docs`, `textures`...) as **`SpaghettiKart-LAN8-Windows.zip`**. No ROM and no `mk64.o2r`.
+2. Replace the files on the `latest-build` branch with it and a new `version.txt` (one line, e.g. `2026-11-21 (main abc1234)`), keeping the branch to one commit:
 
 ```
-makensis installer/installer.nsi    # run in the folder that contains SpaghettiKart-LAN8/
+git fetch origin latest-build && git switch latest-build
+cp /path/to/SpaghettiKart-LAN8-Windows.zip .
+printf "2026-11-21 (main abc1234)" > version.txt
+git add -A && git commit --amend -m "Latest build: $(cat version.txt)"
+git push -f origin latest-build
 ```
+
+Everyone who runs the setup or **Check for updates** after that gets the new build.
+
+### Building the setup
+
+Only needed if `installer/installer.nsi` or `installer/get-latest.ps1` change. With [NSIS](https://nsis.sourceforge.io/) 3:
+
+```
+makensis installer/installer.nsi    # writes installer/SpaghettiKart-LAN8-Setup.exe
+```
+
+Then put the new `SpaghettiKart-LAN8-Setup.exe` on the `latest-build` branch too.
 
 ## Credits and licence
 
