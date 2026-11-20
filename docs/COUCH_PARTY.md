@@ -23,6 +23,12 @@ VS races and Battles for 2 to 8 people on one PC, each with their own view.
 4. Everyone gets their own view and HUD, arranged by the **Split screen**
    setting (Settings → Local Multiplayer, where the monitors are too). Each
    player keeps the controller they joined with.
+   - Each view has the 1-player HUD: lap counter and time at the top, and
+     the minimap, speedometer or race positions in the bottom right. Each
+     player switches their own view between those three with **C-right**
+     (right stick right on a gamepad), just like in a 1-player race.
+   - Your place is shown as a big number in the bottom left, like the
+     4-player VS race.
 
 **VS:** 3 laps, VS items, no CPU drivers. The race ends when all but one player
 have finished.

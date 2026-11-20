@@ -1,0 +1,371 @@
+From f797aaf3947248f7b66e3ad640daecf38e9ff655 Mon Sep 17 00:00:00 2001
+From: T3chnobone <98963290+T3chnobone@users.noreply.github.com>
+Date: Fri, 20 Nov 2026 10:37:07 +0000
+Subject: [PATCH] Couch Party / LAN: 1P-style HUD for every player, place
+ number bottom left
+
+- Each player's view has its own 1P HUD layout: minimap, speedometer or
+  race positions in the bottom right. Each player cycles their own view
+  with their own C-right (right stick right by default), like 1 player.
+  Before, only player 1 could switch, and it switched every view.
+- Each speedometer needle follows its own player's kart, not player 1's.
+- The race positions column puts the view's own player on top with the
+  highlight border.
+- The place is a plain number in the bottom left of every player's view,
+  like the 4-player VS race (it used to be "3rd" on player 1's view only).
+  The ROM only has numbers 1-4, so 5-8 use the digit of the 1P "5th".."8th"
+  pictures.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Qq7B1w48NXvX4p2JZh6P3f
+---
+ src/code_80057C60.c                   | 117 +++++++++++++++++++++++++-
+ src/code_80057C60.h                   |   3 +
+ src/engine/objects/Lakitu.cpp         |   5 +-
+ src/port/localplay/localplay_render.c |   3 +
+ src/render_objects.c                  |  56 +++++++++++-
+ src/render_objects.h                  |   1 +
+ 6 files changed, 179 insertions(+), 6 deletions(-)
+
+diff --git a/src/code_80057C60.c b/src/code_80057C60.c
+index e05f24bd3..41b15fe4e 100644
+--- a/src/code_80057C60.c
++++ b/src/code_80057C60.c
+@@ -6,6 +6,7 @@
+ #include "port/couch/couch.h"
+ #include <libultraship.h>
+ #include "port/netplay/netrace.h"
++#include "port/localplay/localplay.h"
+ #include <macros.h>
+ #include <libultra/gbi.h>
+ #include <mk64.h>
+@@ -718,6 +719,8 @@ void render_hud(u32 arg0) {
+     }
+ }
+ 
++static void view_needle_update(s32 p, f32 speed);
++
+ void func_80058F48(void) {
+     if (gHUDDisable == 0) {
+         set_matrix_hud_screen();
+@@ -786,7 +789,12 @@ void func_800590D4(void) {
+             switch (gPlayerCountSelection1) {
+                 case 1:
+                     if (gModeSelection != TIME_TRIALS) {
+-                        func_8004E800(netrace_view_player());
++                        if (localplay_views_active()) {
++                            // Couch Party / LAN views: just the number, bottom left.
++                            render_view_place_number(netrace_view_player());
++                        } else {
++                            func_8004E800(netrace_view_player());
++                        }
+                         break;
+                     }
+                     break;
+@@ -1144,6 +1152,13 @@ void func_80059D00(void) {
+                     if (playerHUD[netrace_hud_owner()].raceCompleteBool == 0) {
+                         func_8005C360((gPlayers[netrace_hud_owner()].speed / 18.0f) * 216.0f);
+                     }
++                    if (gNetLocalViews && netrace_active()) {
++                        for (k = 1; (k < gNetHumanCount) && (k < NETRACE_MAX_HUMANS); k++) {
++                            if (playerHUD[k].raceCompleteBool == 0) {
++                                view_needle_update(k, (gPlayers[k].speed / 18.0f) * 216.0f);
++                            }
++                        }
++                    }
+                     func_8005D0FC(PLAYER_ONE);
+                 } else {
+                     func_80059820(PLAYER_ONE);
+@@ -1312,11 +1327,111 @@ void func_8005A380(void) {
+     }
+ }
+ 
++// Couch Party / LAN views: every player has their own 1P HUD layout, cycled with
++// their own C-right (right stick right) like the stock 1P race:
++// 0 = minimap, 1 = speedometer, 2 = race positions. HUD only, never read by the race.
++static s8 sViewHudMode[NETRACE_MAX_HUMANS];
++static s8 sSavedHudModes;
++static bool sSavedE6, sSavedE8, sSavedF0;
++static bool sViewHudSaved = false;
++// Each player's own speedometer needle (the stock one follows player 1).
++static u16 sViewNeedle[NETRACE_MAX_HUMANS];
++static u8 sViewNeedleJitter[NETRACE_MAX_HUMANS];
++static f32 sViewNeedleLast[NETRACE_MAX_HUMANS];
++
++static void hud_set_1p_layout(s32 mode) {
++    gHUDModes = mode;
++    D_801657E8 = (mode == 0);
++    D_801657E6 = (mode == 1);
++    D_801657F0 = (mode == 2);
++}
++
++static bool view_hud_toggle(void) {
++    s32 first = 0;
++    s32 count = gNetHumanCount;
++    s32 p;
++    bool changed = false;
++
++    couch_local_players(&first, &count); // LAN GAME: only this PC's players
++    for (p = first; (p < first + count) && (p < gNetHumanCount) && (p < NETRACE_MAX_HUMANS); p++) {
++        if (p < 0) {
++            continue;
++        }
++        if (get_player_controller(p)->buttonPressed & R_CBUTTONS) {
++            if (++sViewHudMode[p] >= 3) {
++                sViewHudMode[p] = 0;
++            }
++            changed = true;
++        }
++    }
++    return changed;
++}
++
++void view_hud_begin(s32 playerId) {
++    if ((playerId < 0) || (playerId >= NETRACE_MAX_HUMANS)) {
++        return;
++    }
++    if (!sViewHudSaved) {
++        sSavedHudModes = gHUDModes;
++        sSavedE6 = D_801657E6;
++        sSavedE8 = D_801657E8;
++        sSavedF0 = D_801657F0;
++        sViewHudSaved = true;
++    }
++    hud_set_1p_layout(sViewHudMode[playerId]);
++}
++
++void view_hud_end(void) {
++    if (sViewHudSaved) {
++        gHUDModes = sSavedHudModes;
++        D_801657E6 = sSavedE6;
++        D_801657E8 = sSavedE8;
++        D_801657F0 = sSavedF0;
++        sViewHudSaved = false;
++    }
++}
++
++// Mirrors func_8005C360 for one player.
++static void view_needle_update(s32 p, f32 speed) {
++    u16 v;
++    if (speed < 10.0) {
++        v = (u16) (128.0f * speed) + 0xDD00;
++    } else if (speed < 20.0) {
++        v = (u16) ((speed - 10.0) * 256.0) + 0xE200;
++    } else {
++        v = (u16) ((speed - 20.0) * 268.8) + 0xEC00;
++    }
++    if (speed == sViewNeedleLast[p]) {
++        if (speed > 5.0f) {
++            if (++sViewNeedleJitter[p] >= 8) {
++                sViewNeedleJitter[p] = 0;
++            }
++        } else {
++            sViewNeedleJitter[p] = 0;
++        }
++    }
++    sViewNeedle[p] = v + D_800E55A0[sViewNeedleJitter[p]];
++    sViewNeedleLast[p] = speed;
++}
++
++u16 view_hud_needle(s32 playerId) {
++    if ((playerId > 0) && (playerId < NETRACE_MAX_HUMANS) && gNetLocalViews && netrace_active()) {
++        return (sViewNeedle[playerId] != 0) ? sViewNeedle[playerId] : 0xDD00;
++    }
++    return D_8016579E;
++}
++
+ void func_8005A3C0(void) {
+     bool b = false;
+     if ((gGamestate != ENDING) && (gGamestate != CREDITS_SEQUENCE) && !D_8018D204) {
+         switch (gPlayerCountSelection1) {
+             case 1:
++                // Couch Party / LAN with a view per player: each player cycles their own view's
++                // layout (map / speedometer / positions) with their own C-right.
++                if (localplay_views_active()) {
++                    b = view_hud_toggle();
++                    break;
++                }
+                 // HUD layout toggle: in a LAN big race each PC uses its own player's
+                 // C-button (the layout is HUD-only, never read by the race).
+                 if (get_player_controller(netrace_hud_owner())->buttonPressed & R_CBUTTONS) {
+diff --git a/src/code_80057C60.h b/src/code_80057C60.h
+index f67964848..d224d0153 100644
+--- a/src/code_80057C60.h
++++ b/src/code_80057C60.h
+@@ -322,6 +322,9 @@ extern s8 D_801657E1;
+ extern s8 D_801657E2;
+ extern s8 D_801657E3;
+ extern s8 gHUDModes;
++void view_hud_begin(s32 playerId);
++void view_hud_end(void);
++u16 view_hud_needle(s32 playerId);
+ extern s8 D_801657E5;
+ extern bool D_801657E6;
+ extern u8 D_801657E7;
+diff --git a/src/engine/objects/Lakitu.cpp b/src/engine/objects/Lakitu.cpp
+index dd64e37ff..1c7d34509 100644
+--- a/src/engine/objects/Lakitu.cpp
++++ b/src/engine/objects/Lakitu.cpp
+@@ -5,6 +5,7 @@
+ #include "port/interpolation/FrameInterpolation.h"
+ 
+ #include "port/Game.h"
++#include "port/netplay/netrace.h"
+ 
+ extern "C" {
+ #include "racing/memory.h"
+@@ -356,7 +357,9 @@ void OLakitu::func_800729EC(s32 objectIndex) {
+     D_8018D2A4 = 1;
+ 
+     if (!IsYoshiValley()) {
+-        for (i = 0; i < gPlayerCount; i++) {
++        // Couch Party / LAN: every human driver's view shows its place.
++        s32 count = (netrace_human_loop_count() > gPlayerCount) ? netrace_human_loop_count() : gPlayerCount;
++        for (i = 0; i < count; i++) {
+             playerHUD[i].unk_81 = temp_v1;
+         }
+     }
+diff --git a/src/port/localplay/localplay_render.c b/src/port/localplay/localplay_render.c
+index ecd2df97c..b550d48ad 100644
+--- a/src/port/localplay/localplay_render.c
++++ b/src/port/localplay/localplay_render.c
+@@ -206,6 +206,8 @@ void localplay_render_views(void) {
+         gLocalViewAspectOverride = pixelW / pixelH;
+         gNetViewPlayer = p; // the HUD shows this player's item, laps, place
+ 
++        view_hud_begin(p); // this player's own map / speedometer / positions choice
++
+         gsSPSetFB(gDisplayListHead++, fb);
+         render_screens(screen, RENDER_SCREEN_MODE_1P_PLAYER_ONE, 0, p);
+         func_800591B4(); // minimap and other overlays, per view
+@@ -213,6 +215,7 @@ void localplay_render_views(void) {
+         drawn[v] = 1;
+     }
+ 
++    view_hud_end();
+     gLocalViewAspectOverride = 0.0f;
+     gNetViewPlayer = 0;
+     sJumboView = -1;
+diff --git a/src/render_objects.c b/src/render_objects.c
+index 77b7f2b34..213e2a994 100644
+--- a/src/render_objects.c
++++ b/src/render_objects.c
+@@ -5,6 +5,10 @@
+ 
+ #include "port/couch/couch.h"
+ #include "port/netplay/netrace.h"
++#ifndef VIEW_PLACE_DIGIT_X0
++#define VIEW_PLACE_DIGIT_X0 0
++#define VIEW_PLACE_DIGIT_W 64
++#endif
+ #include <libultraship.h>
+ #include <libultra/gbi.h>
+ #include <stdio.h>
+@@ -2492,6 +2496,48 @@ void func_8004E998(s32 playerId) {
+     }
+ }
+ 
++// Couch Party / LAN views: the place as a plain number in the bottom left, like
++// the 4-player VS race. The ROM only has those numbers for 1-4, so 5-8 use the
++// digit from the 1P "5th".."8th" pictures (the digit part only, same colours).
++#define PLACE_DIGIT_X0 VIEW_PLACE_DIGIT_X0
++#define PLACE_DIGIT_W VIEW_PLACE_DIGIT_W
++static Vtx sPlaceDigitVtx[] = {
++    { { { -(PLACE_DIGIT_W / 2), -32, 0 }, 0, { PLACE_DIGIT_X0 << 6, 0 }, { 255, 255, 255, 255 } } },
++    { { { (PLACE_DIGIT_W / 2) - 1, -32, 0 }, 0, { (PLACE_DIGIT_X0 + PLACE_DIGIT_W - 1) << 6, 0 }, { 255, 255, 255, 255 } } },
++    { { { (PLACE_DIGIT_W / 2) - 1, 31, 0 }, 0, { (PLACE_DIGIT_X0 + PLACE_DIGIT_W - 1) << 6, 63 << 6 }, { 255, 255, 255, 255 } } },
++    { { { -(PLACE_DIGIT_W / 2), 31, 0 }, 0, { PLACE_DIGIT_X0 << 6, 63 << 6 }, { 255, 255, 255, 255 } } },
++};
++
++void render_view_place_number(s32 playerId) {
++    s32 rank;
++    s32 x;
++    s32 y;
++
++    if ((playerId < 0) || (playerId >= NUM_PLAYERS) || (playerHUD[playerId].unk_81 == 0)) {
++        return;
++    }
++    rank = gGPCurrentRaceRankByPlayerId[playerId];
++    if ((rank < 0) || (rank > 7)) {
++        return;
++    }
++    x = playerHUD[playerId].rankX + playerHUD[playerId].slideRankX;
++    y = playerHUD[playerId].rankY + playerHUD[playerId].slideRankY;
++    FrameInterpolation_RecordOpenChild("Player place number", playerId);
++    if (rank < 4) {
++        func_8004A384(x, y, 0U, playerHUD[playerId].rankScaling, 0xFF, D_800E55F8[rank], 0, 0xFF,
++                      (u8*) D_0D015258[rank], D_0D006030, 0x40, 0x40, 0x40, 0x40);
++    } else {
++        func_80042330_wide(x, y, 0U, playerHUD[playerId].rankScaling);
++        gSPDisplayList(gDisplayListHead++, D_0D007A60);
++        func_8004B414(0xFF, D_800E55F8[rank], 0, 0xFF);
++        func_80044DA0((u8*) common_texture_hud_place[rank], 0x80, 0x40);
++        gSPVertex(gDisplayListHead++, (uintptr_t) sPlaceDigitVtx, 4, 0);
++        gSPDisplayList(gDisplayListHead++, common_rectangle_display);
++        gSPTexture(gDisplayListHead++, 0x0001, 0x0001, 0, G_TX_RENDERTILE, G_OFF);
++    }
++    FrameInterpolation_RecordCloseChild();
++}
++
+ void func_8004EB30(UNUSED s32 arg0) {
+ }
+ 
+@@ -2554,7 +2600,7 @@ void render_speedometer(s32 playerIdx) {
+                   0xFF, (u8*) common_texture_speedometer, speedometer_vtx, 64, 96, 64, 48);
+     // x, y, needle rot. The needle sits on this player's own dial (each view
+     // of a Couch Party / LAN race has one); D_8018CFEC/D_8018CFF4 are player 1's.
+-    func_8004A258(playerHUD[playerIdx].speedometerX + 0x18, playerHUD[playerIdx].speedometerY + 6, D_8016579E, 1.0f, (u8*) common_texture_speedometer_needle, D_0D005FF0, 0x40,
++    func_8004A258(playerHUD[playerIdx].speedometerX + 0x18, playerHUD[playerIdx].speedometerY + 6, view_hud_needle(playerIdx), 1.0f, (u8*) common_texture_speedometer_needle, D_0D005FF0, 0x40,
+                   0x20, 0x40, 0x20);
+ }
+ 
+@@ -3203,7 +3249,7 @@ void func_80050E34(s32 playerId, s32 arg1) {
+             func_80042330_unchanged(spD0 + 0x1B, (spC4 + spCC) + 4, 0U, 1.0f);
+         }
+         gSPDisplayList(gDisplayListHead++, D_0D006950);
+-        if ((player == gPlayerOne) && (gScreenModeSelection == SCREEN_MODE_1P)) {
++        if ((player == &gPlayerOne[netrace_view_player()]) && (gScreenModeSelection == SCREEN_MODE_1P)) {
+             gSPDisplayList(gDisplayListHead++, D_0D007A40);
+             func_8004B35C(D_8018D3E4, D_8018D3E8, D_8018D3EC, 0x000000FF);
+             func_80044924((u8*) common_texture_character_portrait_border, 0x00000020, 0x00000020);
+@@ -3224,6 +3270,7 @@ void func_800514BC(void) {
+     if (gScreenModeSelection == 0) {
+         func_800508C0();
+     }
++    s32 view = (gModeSelection == 1) ? 0 : netrace_view_player();
+     var_s3 = 8;
+     if ((gPlayerCountSelection1 == 2) && (gActiveScreenMode == 2)) {
+         var_s3 = 0;
+@@ -3231,14 +3278,15 @@ void func_800514BC(void) {
+     for (var_s0 = var_s3 - 1, var_s1 = 0; var_s1 < var_s3; var_s1++, var_s0--) {
+         temp_a0 = gGPCurrentRacePlayerIdByRank[var_s0];
+         player = &gPlayerOne[temp_a0];
+-        if ((player->type & 0x8000) && ((temp_a0 != 0) || (gPlayerCountSelection1 != 1))) {
++        if ((player->type & 0x8000) && ((temp_a0 != view) || (gPlayerCountSelection1 != 1))) {
+             func_80050E34(temp_a0, var_s0);
+         }
+     }
++    // The view's own player goes on top (player 1, or each Couch Party / LAN view's player).
+     if (gModeSelection == 1) {
+         func_80050E34(0, gGPCurrentRaceRankByPlayerIdDup[0]);
+     } else if (gPlayerCountSelection1 == 1) {
+-        func_80050E34(0, gGPCurrentRaceRankByPlayerId[0]);
++        func_80050E34(view, gGPCurrentRaceRankByPlayerId[view]);
+     }
+     gSPTexture(gDisplayListHead++, 1, 1, 0, G_TX_RENDERTILE, G_OFF);
+ }
+diff --git a/src/render_objects.h b/src/render_objects.h
+index 2cf0b147e..64d4d45d7 100644
+--- a/src/render_objects.h
++++ b/src/render_objects.h
+@@ -262,6 +262,7 @@ void func_8004E6C4(s32);
+ void draw_simplified_lap_count(s32);
+ void func_8004E800(s32);
+ void func_8004E998(s32);
++void render_view_place_number(s32);
+ void func_8004EB30(s32);
+ void func_8004EB38(s32);
+ void render_digital_speedometer(s32 playerIdx);
+-- 
+2.43.0
+
