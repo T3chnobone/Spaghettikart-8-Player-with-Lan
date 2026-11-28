@@ -1,0 +1,72 @@
+From 636a2baad59b351aa4cca0b223dbd6bd9653a170 Mon Sep 17 00:00:00 2001
+From: T3chnobone <98963290+T3chnobone@users.noreply.github.com>
+Date: Tue, 24 Nov 2026 10:44:46 +0000
+Subject: [PATCH] Menu font: load only the letter, so HD packs don't cut off
+ its bottom
+
+The big menu font (pause menu, results, menus) loaded each letter as a
+tile one column wider and two rows taller than the letter. With the
+original textures the extra rows are never shown. With an HD texture
+pack (MK64 Reloaded) the replacement picture is stretched over the whole
+loaded tile, so the letter is drawn about 15% taller than its box and the
+bottom of every letter is cut off. Load exactly width x height, clamped.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Qq7B1sDoBwdGBq3YcV1nae
+---
+ src/engine/actors/Text.cpp |  2 +-
+ src/menu_items.c           | 18 ++++++++++++------
+ 2 files changed, 13 insertions(+), 7 deletions(-)
+
+diff --git a/src/engine/actors/Text.cpp b/src/engine/actors/Text.cpp
+index ab56b62fa..60ae740d7 100644
+--- a/src/engine/actors/Text.cpp
++++ b/src/engine/actors/Text.cpp
+@@ -379,7 +379,7 @@ void AText::DrawText3D(Camera* camera) { // Based on func_80095BD0
+         }
+ 
+         //printf("tex texture %p width %d height %d mode %d col %f\n", tex.Texture, tex.width, tex.height, tex.mode, tex.column);
+-        gDPLoadTextureTile_4b(gDisplayListHead++, (Gfx*)tex.Texture, G_IM_FMT_I, tex.width, 0, 0, 0, tex.width, tex.height + 2, 0,
++        gDPLoadTextureTile_4b(gDisplayListHead++, (Gfx*)tex.Texture, G_IM_FMT_I, tex.width, 0, 0, 0, tex.width - 1, tex.height - 1, 0, // whole glyph only (HD packs)
+                             G_TX_NOMIRROR | G_TX_CLAMP, G_TX_NOMIRROR | G_TX_CLAMP, G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD,
+                             G_TX_NOLOD);
+ 
+diff --git a/src/menu_items.c b/src/menu_items.c
+index 6267bb82e..5da862d40 100644
+--- a/src/menu_items.c
++++ b/src/menu_items.c
+@@ -3038,9 +3038,12 @@ Gfx* func_80095BD0(Gfx* displayListHead, u8* arg1, f32 arg2, f32 arg3, u32 arg4,
+ 
+     displayListHead = AddTextMatrix(displayListHead, mf);
+     // gSPMatrix(displayListHead++, mtx, G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
+-    gDPLoadTextureTile_4b(displayListHead++, arg1, G_IM_FMT_I, arg4, 0, 0, 0, arg4, arg5 + 2, 0,
+-                          G_TX_NOMIRROR | G_TX_WRAP, G_TX_NOMIRROR | G_TX_WRAP, G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD,
+-                          G_TX_NOLOD);
++    // @port Load exactly the glyph (arg4 x arg5). The original loaded one column and two rows
++    // past it; with an HD texture pack the replacement picture is stretched over that bigger
++    // tile, so the bottom of every letter was cut off.
++    gDPLoadTextureTile_4b(displayListHead++, arg1, G_IM_FMT_I, arg4, 0, 0, 0, arg4 - 1, arg5 - 1, 0,
++                          G_TX_NOMIRROR | G_TX_CLAMP, G_TX_NOMIRROR | G_TX_CLAMP, G_TX_NOMASK, G_TX_NOMASK,
++                          G_TX_NOLOD, G_TX_NOLOD);
+     switch (arg4) {
+         default:
+             var_a1 = D_02007CD8;
+@@ -3081,9 +3084,12 @@ Gfx* func_80095BD0_wide_right(Gfx* displayListHead, u8* arg1, f32 arg2, f32 arg3
+     displayListHead = AddTextMatrix(displayListHead, mf);
+     // gSPMatrix(displayListHead++, VIRTUAL_TO_PHYSICAL(&gGfxPool->mtxEffect[gMatrixEffectCount++]),
+     //           G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
+-    gDPLoadTextureTile_4b(displayListHead++, arg1, G_IM_FMT_I, arg4, 0, 0, 0, arg4, arg5 + 2, 0,
+-                          G_TX_NOMIRROR | G_TX_WRAP, G_TX_NOMIRROR | G_TX_WRAP, G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD,
+-                          G_TX_NOLOD);
++    // @port Load exactly the glyph (arg4 x arg5). The original loaded one column and two rows
++    // past it; with an HD texture pack the replacement picture is stretched over that bigger
++    // tile, so the bottom of every letter was cut off.
++    gDPLoadTextureTile_4b(displayListHead++, arg1, G_IM_FMT_I, arg4, 0, 0, 0, arg4 - 1, arg5 - 1, 0,
++                          G_TX_NOMIRROR | G_TX_CLAMP, G_TX_NOMIRROR | G_TX_CLAMP, G_TX_NOMASK, G_TX_NOMASK,
++                          G_TX_NOLOD, G_TX_NOLOD);
+     switch (arg4) {
+         default:
+             var_a1 = D_02007CD8;
+-- 
+2.43.0
+

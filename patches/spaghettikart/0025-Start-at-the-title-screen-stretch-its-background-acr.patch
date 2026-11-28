@@ -1,0 +1,138 @@
+From 03fb012dcd81fdb3df00e2a379d5487929a2d988 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 20 Nov 2026 14:31:56 +0000
+Subject: [PATCH] Start at the title screen; stretch its background across
+ widescreen windows
+
+- The game now starts straight at the title screen: the Harbour Masters
+  ship intro and the Nintendo logo intro are skipped by default. Settings
+  > Startup Behaviour still offers them (it now defaults to Start Menu).
+- The title screen background is stretched to the full width of a
+  widescreen window instead of a 4:3 picture with black sides. The logo,
+  flag and text stay centred as before.
+---
+ src/menu_items.c         | 65 +++++++++++++++++++++++++++++++++++++++-
+ src/port/Game.cpp        |  4 +--
+ src/port/ui/PortMenu.cpp |  1 +
+ 3 files changed, 67 insertions(+), 3 deletions(-)
+
+diff --git a/src/menu_items.c b/src/menu_items.c
+index 6267bb82e..c3047d45b 100644
+--- a/src/menu_items.c
++++ b/src/menu_items.c
+@@ -4585,6 +4585,69 @@ Gfx* render_menu_textures(Gfx* arg0, MenuTexture* arg1, s32 column, s32 row) {
+     return arg0;
+ }
+ 
++// Like render_menu_textures, but stretched across the whole width of a
++// widescreen window (the title screen background). 4:3 or narrower windows
++// draw it as normal.
++Gfx* render_menu_textures_full_width(Gfx* arg0, MenuTexture* arg1, s32 column, s32 row) {
++    f32 left = OTRGetDimensionFromLeftEdge(0.0f);
++    f32 right = OTRGetDimensionFromRightEdge((f32) SCREEN_WIDTH);
++    f32 stretch = (right - left) / (f32) SCREEN_WIDTH;
++    u8* texture;
++    s8 format;
++    s32 x0;
++    s32 x1;
++    s32 y0;
++
++    if ((stretch <= 1.0f) || (gTransitionType[4] == 4)) {
++        return render_menu_textures(arg0, arg1, column, row);
++    }
++    while (arg1->textureData != NULL) {
++        format = 0;
++        switch (arg1->type) {
++            case 0:
++                gSPDisplayList(arg0++, D_02007708);
++                break;
++            case 1:
++                gSPDisplayList(arg0++, D_02007728);
++                break;
++            case 2:
++                gSPDisplayList(arg0++, D_02007748);
++                break;
++            case 3:
++                gSPDisplayList(arg0++, D_02007768);
++                format = 3;
++                break;
++            case 4:
++                gSPDisplayList(arg0++, D_02007788);
++                break;
++            default:
++                gSPDisplayList(arg0++, D_02007728);
++                break;
++        }
++        texture = (u8*) func_8009B8C4(arg1->textureData);
++        if (texture != NULL) {
++            // Scaled rectangles need 1-cycle mode (copy mode can't scale).
++            gDPPipeSync(arg0++);
++            gDPSetCycleType(arg0++, G_CYC_1CYCLE);
++            gDPSetCombineMode(arg0++, G_CC_DECALRGBA, G_CC_DECALRGBA);
++            gDPSetRenderMode(arg0++, G_RM_OPA_SURF, G_RM_OPA_SURF2);
++            gDPSetTextureFilter(arg0++, G_TF_POINT);
++            gDPLoadTextureTile(arg0++, arg1->textureData, format, G_IM_SIZ_16b, arg1->width, arg1->height, 0, 0,
++                               arg1->width - 1, arg1->height - 1, 0, G_TX_NOMIRROR | G_TX_CLAMP,
++                               G_TX_NOMIRROR | G_TX_CLAMP, 0, 0, G_TX_NOLOD, G_TX_NOLOD);
++            // Edges in quarter pixels from the same formula, so strips meet exactly.
++            x0 = (s32) ((left + (f32) (arg1->dX + column) * stretch) * 4.0f);
++            x1 = (s32) ((left + (f32) (arg1->dX + column + arg1->width) * stretch) * 4.0f);
++            y0 = arg1->dY + row;
++            gSPWideTextureRectangle(arg0++, x0, y0 << 2, x1, (y0 + arg1->height) << 2, G_TX_RENDERTILE, 0, 0,
++                                    (s32) (1024.0f / stretch), 1024);
++        }
++        arg1++;
++    }
++    gDPPipeSync(arg0++);
++    return arg0;
++}
++
+ Gfx* render_menu_textures_alt(Gfx* arg0, MenuTexture* arg1, s32 column, s32 row) {
+     UNUSED u8* temp_v0_3;
+     s8 var_s4;
+@@ -6431,7 +6494,7 @@ void render_menus(MenuItem* arg0) {
+                 func_800A0EB8(arg0, arg0->type - 0xD8);
+                 break;
+             case MENU_ITEM_UI_START_BACKGROUND:
+-                gDisplayListHead = render_menu_textures(
++                gDisplayListHead = render_menu_textures_full_width(
+                     gDisplayListHead, gMenuTexturesBackground[has_unlocked_extra_mode()], arg0->column, arg0->row);
+                 break;
+             case MENU_ITEM_UI_LOGO_AND_COPYRIGHT:
+diff --git a/src/port/Game.cpp b/src/port/Game.cpp
+index 1bf4bc88d..891bff63d 100644
+--- a/src/port/Game.cpp
++++ b/src/port/Game.cpp
+@@ -961,7 +961,7 @@ static void ResetToMenus(bool forNetplay) {
+     TrackBrowser::Instance->Reset();
+ 
+     // Land on the same screen the gSkipIntro setting picks at boot.
+-    switch (CVarGetInteger("gSkipIntro", 0)) {
++    switch (CVarGetInteger("gSkipIntro", 2)) {
+         case 0:
+             gMenuSelection = HARBOUR_MASTERS_MENU;
+             break;
+@@ -1106,7 +1106,7 @@ extern "C"
+ 
+     CustomEngineInit();
+ 
+-    switch(CVarGetInteger("gSkipIntro", 0)) {
++    switch(CVarGetInteger("gSkipIntro", 2)) {
+         case 0:
+             gMenuSelection = HARBOUR_MASTERS_MENU;
+             break;
+diff --git a/src/port/ui/PortMenu.cpp b/src/port/ui/PortMenu.cpp
+index 4f9b2bbe6..43183bf66 100644
+--- a/src/port/ui/PortMenu.cpp
++++ b/src/port/ui/PortMenu.cpp
+@@ -109,6 +109,7 @@ void PortMenu::AddSettings() {
+         .CVar("gSkipIntro")
+         .Options(ComboboxOptions()
+             .ComboMap(introBehaviourOptions)
++            .DefaultIndex(2) // the title screen: no intros
+             .Tooltip("Select which scene or menu the game launch to."));
+ 
+     AddWidget(path, "Menu Theme", WIDGET_CVAR_COMBOBOX)
+-- 
+2.43.0
+
