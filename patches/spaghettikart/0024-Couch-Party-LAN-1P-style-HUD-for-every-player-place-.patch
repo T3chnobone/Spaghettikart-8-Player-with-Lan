@@ -1,4 +1,4 @@
-From f797aaf3947248f7b66e3ad640daecf38e9ff655 Mon Sep 17 00:00:00 2001
+From 92818f824ca82f7a195772555a175e2d6a04ce87 Mon Sep 17 00:00:00 2001
 From: T3chnobone <98963290+T3chnobone@users.noreply.github.com>
 Date: Fri, 20 Nov 2026 10:37:07 +0000
 Subject: [PATCH] Couch Party / LAN: 1P-style HUD for every player, place
@@ -23,9 +23,9 @@ Claude-Session: https://claude.ai/code/session_01Qq7B1w48NXvX4p2JZh6P3f
  src/code_80057C60.h                   |   3 +
  src/engine/objects/Lakitu.cpp         |   5 +-
  src/port/localplay/localplay_render.c |   3 +
- src/render_objects.c                  |  56 +++++++++++-
+ src/render_objects.c                  |  64 +++++++++++++-
  src/render_objects.h                  |   1 +
- 6 files changed, 179 insertions(+), 6 deletions(-)
+ 6 files changed, 187 insertions(+), 6 deletions(-)
 
 diff --git a/src/code_80057C60.c b/src/code_80057C60.c
 index e05f24bd3..41b15fe4e 100644
@@ -247,34 +247,35 @@ index ecd2df97c..b550d48ad 100644
      gNetViewPlayer = 0;
      sJumboView = -1;
 diff --git a/src/render_objects.c b/src/render_objects.c
-index 77b7f2b34..213e2a994 100644
+index 77b7f2b34..63c9cdcf7 100644
 --- a/src/render_objects.c
 +++ b/src/render_objects.c
-@@ -5,6 +5,10 @@
- 
- #include "port/couch/couch.h"
- #include "port/netplay/netrace.h"
-+#ifndef VIEW_PLACE_DIGIT_X0
-+#define VIEW_PLACE_DIGIT_X0 0
-+#define VIEW_PLACE_DIGIT_W 64
-+#endif
- #include <libultraship.h>
- #include <libultra/gbi.h>
- #include <stdio.h>
-@@ -2492,6 +2496,48 @@ void func_8004E998(s32 playerId) {
+@@ -2492,6 +2492,60 @@ void func_8004E998(s32 playerId) {
      }
  }
  
 +// Couch Party / LAN views: the place as a plain number in the bottom left, like
 +// the 4-player VS race. The ROM only has those numbers for 1-4, so 5-8 use the
 +// digit from the 1P "5th".."8th" pictures (the digit part only, same colours).
-+#define PLACE_DIGIT_X0 VIEW_PLACE_DIGIT_X0
-+#define PLACE_DIGIT_W VIEW_PLACE_DIGIT_W
-+static Vtx sPlaceDigitVtx[] = {
-+    { { { -(PLACE_DIGIT_W / 2), -32, 0 }, 0, { PLACE_DIGIT_X0 << 6, 0 }, { 255, 255, 255, 255 } } },
-+    { { { (PLACE_DIGIT_W / 2) - 1, -32, 0 }, 0, { (PLACE_DIGIT_X0 + PLACE_DIGIT_W - 1) << 6, 0 }, { 255, 255, 255, 255 } } },
-+    { { { (PLACE_DIGIT_W / 2) - 1, 31, 0 }, 0, { (PLACE_DIGIT_X0 + PLACE_DIGIT_W - 1) << 6, 63 << 6 }, { 255, 255, 255, 255 } } },
-+    { { { -(PLACE_DIGIT_W / 2), 31, 0 }, 0, { PLACE_DIGIT_X0 << 6, 63 << 6 }, { 255, 255, 255, 255 } } },
++// The digit of "5th".."8th" is the left part of the 128x64 picture, up to
++// where "th" starts: 57, 59, 53 and 57 pixels (measured on the US ROM).
++static Vtx sPlaceDigitVtx[4][4] = {
++    { { { { -28, -32, 0 }, 0, { 0, 0 }, { 255, 255, 255, 255 } } },
++      { { { 28, -32, 0 }, 0, { 56 << 6, 0 }, { 255, 255, 255, 255 } } },
++      { { { 28, 31, 0 }, 0, { 56 << 6, 63 << 6 }, { 255, 255, 255, 255 } } },
++      { { { -28, 31, 0 }, 0, { 0, 63 << 6 }, { 255, 255, 255, 255 } } } },
++    { { { { -29, -32, 0 }, 0, { 0, 0 }, { 255, 255, 255, 255 } } },
++      { { { 29, -32, 0 }, 0, { 58 << 6, 0 }, { 255, 255, 255, 255 } } },
++      { { { 29, 31, 0 }, 0, { 58 << 6, 63 << 6 }, { 255, 255, 255, 255 } } },
++      { { { -29, 31, 0 }, 0, { 0, 63 << 6 }, { 255, 255, 255, 255 } } } },
++    { { { { -26, -32, 0 }, 0, { 0, 0 }, { 255, 255, 255, 255 } } },
++      { { { 26, -32, 0 }, 0, { 52 << 6, 0 }, { 255, 255, 255, 255 } } },
++      { { { 26, 31, 0 }, 0, { 52 << 6, 63 << 6 }, { 255, 255, 255, 255 } } },
++      { { { -26, 31, 0 }, 0, { 0, 63 << 6 }, { 255, 255, 255, 255 } } } },
++    { { { { -28, -32, 0 }, 0, { 0, 0 }, { 255, 255, 255, 255 } } },
++      { { { 28, -32, 0 }, 0, { 56 << 6, 0 }, { 255, 255, 255, 255 } } },
++      { { { 28, 31, 0 }, 0, { 56 << 6, 63 << 6 }, { 255, 255, 255, 255 } } },
++      { { { -28, 31, 0 }, 0, { 0, 63 << 6 }, { 255, 255, 255, 255 } } } },
 +};
 +
 +void render_view_place_number(s32 playerId) {
@@ -300,7 +301,7 @@ index 77b7f2b34..213e2a994 100644
 +        gSPDisplayList(gDisplayListHead++, D_0D007A60);
 +        func_8004B414(0xFF, D_800E55F8[rank], 0, 0xFF);
 +        func_80044DA0((u8*) common_texture_hud_place[rank], 0x80, 0x40);
-+        gSPVertex(gDisplayListHead++, (uintptr_t) sPlaceDigitVtx, 4, 0);
++        gSPVertex(gDisplayListHead++, (uintptr_t) sPlaceDigitVtx[rank - 4], 4, 0);
 +        gSPDisplayList(gDisplayListHead++, common_rectangle_display);
 +        gSPTexture(gDisplayListHead++, 0x0001, 0x0001, 0, G_TX_RENDERTILE, G_OFF);
 +    }
@@ -310,7 +311,7 @@ index 77b7f2b34..213e2a994 100644
  void func_8004EB30(UNUSED s32 arg0) {
  }
  
-@@ -2554,7 +2600,7 @@ void render_speedometer(s32 playerIdx) {
+@@ -2554,7 +2608,7 @@ void render_speedometer(s32 playerIdx) {
                    0xFF, (u8*) common_texture_speedometer, speedometer_vtx, 64, 96, 64, 48);
      // x, y, needle rot. The needle sits on this player's own dial (each view
      // of a Couch Party / LAN race has one); D_8018CFEC/D_8018CFF4 are player 1's.
@@ -319,7 +320,7 @@ index 77b7f2b34..213e2a994 100644
                    0x20, 0x40, 0x20);
  }
  
-@@ -3203,7 +3249,7 @@ void func_80050E34(s32 playerId, s32 arg1) {
+@@ -3203,7 +3257,7 @@ void func_80050E34(s32 playerId, s32 arg1) {
              func_80042330_unchanged(spD0 + 0x1B, (spC4 + spCC) + 4, 0U, 1.0f);
          }
          gSPDisplayList(gDisplayListHead++, D_0D006950);
@@ -328,7 +329,7 @@ index 77b7f2b34..213e2a994 100644
              gSPDisplayList(gDisplayListHead++, D_0D007A40);
              func_8004B35C(D_8018D3E4, D_8018D3E8, D_8018D3EC, 0x000000FF);
              func_80044924((u8*) common_texture_character_portrait_border, 0x00000020, 0x00000020);
-@@ -3224,6 +3270,7 @@ void func_800514BC(void) {
+@@ -3224,6 +3278,7 @@ void func_800514BC(void) {
      if (gScreenModeSelection == 0) {
          func_800508C0();
      }
@@ -336,7 +337,7 @@ index 77b7f2b34..213e2a994 100644
      var_s3 = 8;
      if ((gPlayerCountSelection1 == 2) && (gActiveScreenMode == 2)) {
          var_s3 = 0;
-@@ -3231,14 +3278,15 @@ void func_800514BC(void) {
+@@ -3231,14 +3286,15 @@ void func_800514BC(void) {
      for (var_s0 = var_s3 - 1, var_s1 = 0; var_s1 < var_s3; var_s1++, var_s0--) {
          temp_a0 = gGPCurrentRacePlayerIdByRank[var_s0];
          player = &gPlayerOne[temp_a0];

@@ -17,7 +17,7 @@ The setup is small: when it runs it **downloads the newest build from this repo*
 
 - Installs for your Windows account only (no admin prompt), by default to `%LOCALAPPDATA%\SpaghettiKart-LAN8`.
 - Adds Start menu and desktop shortcuts and an uninstaller (Settings > Apps).
-- Updating keeps your settings, leaderboards, mods and any menu pictures you replaced.
+- Updating keeps your settings, leaderboards, mods and texture packs, and any menu pictures you replaced: those are only installed when they aren't there yet.
 
 Windows may warn that the app is from an unknown publisher because the build isn't signed: choose **More info > Run anyway**.
 
