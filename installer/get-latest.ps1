@@ -60,23 +60,35 @@ if (-not $found) { Done 3 "The download has no Spaghettify.exe in it." }
 $src = $found.DirectoryName
 
 # --- copy into the install folder ---
-# Files the player may have changed are only copied when missing.
-$keepIfPresent = @(
-    "spaghettify.cfg.json",
-    "textures\couch_party_button.png",
-    "textures\lan_game_button.png",
-    "textures\character_highlight.png"
-)
-# Never shipped, never touched: mk64.o2r, leaderboards.json, logs\, mods\, saves.
+# The game itself (exe, DLLs, spaghetti.o2r, yamls, docs) is always updated.
+# The player's assets and mods are only copied when they aren't there yet, so
+# an update never replaces them:
+#   - spaghettify.cfg.json (settings)
+#   - anything in mods\ and textures\ (HD packs, replaced menu pictures)
+#   - meta\mods.toml
+#   - any .o2r / .otr other than spaghetti.o2r (e.g. mk64.o2r, texture packs)
+# Never shipped, never touched: mk64.o2r, leaderboards.json, logs\, saves.
+function Test-KeepIfPresent([string]$rel) {
+    $r = $rel.Replace('/', '\').ToLowerInvariant()
+    if ($r -eq "spaghettify.cfg.json") { return $true }
+    if ($r -eq "meta\mods.toml") { return $true }
+    if ($r.StartsWith("mods\") -or $r.StartsWith("textures\")) { return $true }
+    if (($r.EndsWith(".o2r") -or $r.EndsWith(".otr")) -and ($r -ne "spaghetti.o2r")) { return $true }
+    return $false
+}
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 $manifest = New-Object System.Collections.Generic.List[string]
+$kept = 0
 try {
     Get-ChildItem -LiteralPath $src -Recurse -File | ForEach-Object {
         $rel = $_.FullName.Substring($src.Length).TrimStart('\', '/')
         $dst = Join-Path $InstallDir $rel
         $manifest.Add($rel)
-        if (($keepIfPresent -contains $rel) -and (Test-Path -LiteralPath $dst)) { return }
+        if ((Test-KeepIfPresent $rel) -and (Test-Path -LiteralPath $dst)) {
+            $kept++
+            return
+        }
         $dir = Split-Path -Parent $dst
         if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
         Copy-Item -LiteralPath $_.FullName -Destination $dst -Force
@@ -89,4 +101,4 @@ try {
 $manifest | Set-Content -LiteralPath (Join-Path $InstallDir "installed-files.txt") -Encoding ASCII
 Set-Content -LiteralPath (Join-Path $InstallDir "version.txt") -Value $version -Encoding ASCII -NoNewline
 
-Done 0 "Installed build $version ($($manifest.Count) files)."
+Done 0 "Installed build $version ($($manifest.Count) files, kept $kept of your own assets/mods as they were)."
